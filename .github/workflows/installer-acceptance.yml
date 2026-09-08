@@ -38,7 +38,7 @@ jobs:
           done
           test "$RELEASE_TAG" != "$PREVIOUS_REF"
       - name: Check out the previous version source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.previous_ref }}
           path: previous-source
@@ -133,7 +133,7 @@ jobs:
           }
           if ($env:RELEASE_TAG -eq $env:PREVIOUS_REF) { throw 'Choose distinct previous and candidate versions.' }
       - name: Check out the previous version source
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.previous_ref }}
           path: previous-source
@@ -252,7 +252,7 @@ jobs:
           mkdir -p "$docker_config"
           test ! -e "$docker_config/config.json"
           echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - name: Pull publicly and run both published architectures
         run: |
           image="ghcr.io/dkplugins/tokenresetsmonitor:$RELEASE_TAG"
