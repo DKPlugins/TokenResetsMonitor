@@ -6,6 +6,11 @@ on:
       version:
         description: Published candidate tag to install and upgrade in disposable runners
         required: true
+        default: v1.0.0-rc.2
+        type: string
+      previous_ref:
+        description: Previous immutable Git tag to build for installer upgrade and backup rollback
+        required: true
         default: v1.0.0-rc.1
         type: string
 
@@ -17,36 +22,95 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ inputs.version }}
+      PREVIOUS_REF: ${{ inputs.previous_ref }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Validate version references
+        run: |
+          for reference in "$RELEASE_TAG" "$PREVIOUS_REF"; do
+            if ! printf '%s\n' "$reference" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'; then
+              echo 'Invalid version reference.' >&2
+              exit 2
+            fi
+          done
+          test "$RELEASE_TAG" != "$PREVIOUS_REF"
+      - name: Check out the previous version source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.previous_ref }}
+          path: previous-source
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: previous-source/go.mod
+          cache-dependency-path: previous-source/go.sum
+      - name: Build the exact previous source revision
+        working-directory: previous-source
+        run: |
+          mkdir -p "$RUNNER_TEMP/trm-previous"
+          module=github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo
+          commit=$(git rev-parse HEAD)
+          echo "Previous source: $PREVIOUS_REF at $commit (built in this acceptance job)"
+          go build -trimpath -ldflags "-X $module.Version=${PREVIOUS_REF#v} -X $module.Commit=$commit" -o "$RUNNER_TEMP/trm-previous/tokenresetsmonitor" ./cmd/tokenresetsmonitor
+          "$RUNNER_TEMP/trm-previous/tokenresetsmonitor" version
       - name: Download the published installer
         run: |
           printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
           mkdir -p "$RUNNER_TEMP/trm-installer-acceptance"
           gh release download "$RELEASE_TAG" --pattern install.sh --dir "$RUNNER_TEMP/trm-installer-acceptance"
-      - name: Install, run, update, and verify preserved state
+      - name: Reject a tampered release archive
+        run: sudo env CI=true sh scripts/test-installer-checksum.sh "$RUNNER_TEMP/trm-installer-acceptance/install.sh" "$RELEASE_TAG"
+      - name: Install, upgrade the previous binary, and restore its backup
         run: |
           set -eu
           installer="$RUNNER_TEMP/trm-installer-acceptance/install.sh"
           sudo env TRM_API_BASE_URL=http://127.0.0.1:1/api/v1 sh "$installer" --version "$RELEASE_TAG" --no-start
+          # The candidate installs service paths/ACLs; its stopped executable is
+          # replaced with a binary built from the actual previous Git tag.
+          sudo install -m 755 "$RUNNER_TEMP/trm-previous/tokenresetsmonitor" /usr/local/bin/tokenresetsmonitor
+          test "$(tokenresetsmonitor version --json | jq -r .version)" = "${PREVIOUS_REF#v}"
           sudo systemctl start tokenresetsmonitor
           sleep 2
           sudo systemctl is-active --quiet tokenresetsmonitor
           sudo systemctl stop tokenresetsmonitor
           sudo test -s /var/lib/tokenresetsmonitor/state.db
-          sudo sha256sum /etc/tokenresetsmonitor/config.yaml /var/lib/tokenresetsmonitor/state.db > "$RUNNER_TEMP/trm-before.sha256"
+          sudo sha256sum /etc/tokenresetsmonitor/config.yaml /var/lib/tokenresetsmonitor/state.db | tee "$RUNNER_TEMP/trm-before.sha256"
           sudo sh "$installer" --version "$RELEASE_TAG" --no-start
           sudo sha256sum --check "$RUNNER_TEMP/trm-before.sha256"
-          sudo test -n "$(sudo find /var/backups/tokenresetsmonitor -name state.db -type f -print -quit)"
+          backup=$(sudo find /var/backups/tokenresetsmonitor -mindepth 1 -maxdepth 1 -type d -print | sort | tail -n 1)
+          test -n "$backup"
+          sudo test -s "$backup/data/state.db"
+          test "$(tokenresetsmonitor version --json | jq -r .version)" = "${RELEASE_TAG#v}"
+          mkdir -p "$RUNNER_TEMP/trm-candidate"
+          cp /usr/local/bin/tokenresetsmonitor "$RUNNER_TEMP/trm-candidate/tokenresetsmonitor"
           sudo systemctl start tokenresetsmonitor
           sleep 2
           sudo systemctl is-active --quiet tokenresetsmonitor
           sudo tokenresetsmonitor status --json --config /etc/tokenresetsmonitor/config.yaml
           sudo systemctl stop tokenresetsmonitor
           tokenresetsmonitor version
+          # Explicit rollback uses the installer's real backup, including its
+          # old executable, configuration, database and operational snapshot.
+          sudo install -m 755 "$backup/tokenresetsmonitor" /usr/local/bin/tokenresetsmonitor
+          sudo cp -p "$backup/config.yaml" /etc/tokenresetsmonitor/config.yaml
+          sudo cp -p "$backup/data/state.db" /var/lib/tokenresetsmonitor/state.db
+          sudo cp -p "$backup/data/state.db.status.json" /var/lib/tokenresetsmonitor/state.db.status.json
+          sudo sha256sum --check "$RUNNER_TEMP/trm-before.sha256"
+          test "$(tokenresetsmonitor version --json | jq -r .version)" = "${PREVIOUS_REF#v}"
+          sudo systemctl start tokenresetsmonitor
+          sleep 2
+          sudo systemctl is-active --quiet tokenresetsmonitor
+          sudo tokenresetsmonitor status --json --config /etc/tokenresetsmonitor/config.yaml
+          sudo systemctl stop tokenresetsmonitor
+          echo "Published $RELEASE_TAG installer upgraded source-built $PREVIOUS_REF and its backup restored the previous working service."
+      - name: Preserve a pending delivery across binary upgrade and rollback
+        env:
+          TRM_ACCEPTANCE_OLD_BINARY: ${{ runner.temp }}/trm-previous/tokenresetsmonitor
+          TRM_ACCEPTANCE_NEW_BINARY: ${{ runner.temp }}/trm-candidate/tokenresetsmonitor
+        run: go test -count=1 -v -timeout 2m ./internal/monitor -run TestBinaryUpgradeRollbackAcceptance
       - name: Show service diagnostics
         if: always()
         run: sudo journalctl -u tokenresetsmonitor --no-pager -n 50 || true
@@ -55,11 +119,42 @@ jobs:
     runs-on: windows-latest
     env:
       RELEASE_TAG: ${{ inputs.version }}
+      PREVIOUS_REF: ${{ inputs.previous_ref }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Validate version references
+        shell: pwsh
+        run: |
+          foreach ($value in @($env:RELEASE_TAG, $env:PREVIOUS_REF)) {
+            if ($value -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$') { throw 'Invalid version reference.' }
+          }
+          if ($env:RELEASE_TAG -eq $env:PREVIOUS_REF) { throw 'Choose distinct previous and candidate versions.' }
+      - name: Check out the previous version source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.previous_ref }}
+          path: previous-source
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: previous-source/go.mod
+          cache-dependency-path: previous-source/go.sum
+      - name: Build the exact previous source revision
+        working-directory: previous-source
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'trm-previous'
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+          $module = 'github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo'
+          $commit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve previous source commit.' }
+          $version = $env:PREVIOUS_REF.Substring(1)
+          Write-Host "Previous source: $env:PREVIOUS_REF at $commit (built in this acceptance job)"
+          go build -trimpath -ldflags "-X $module.Version=$version -X $module.Commit=$commit" -o (Join-Path $target 'tokenresetsmonitor.exe') ./cmd/tokenresetsmonitor
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot build previous source.' }
       - name: Download the published installer
         shell: pwsh
         run: |
@@ -68,7 +163,10 @@ jobs:
           New-Item -ItemType Directory -Path $target -Force | Out-Null
           gh release download $env:RELEASE_TAG --pattern install.ps1 --dir $target
           if ($LASTEXITCODE -ne 0) { throw 'Cannot download published installer.' }
-      - name: Install, run, update, and verify preserved state
+      - name: Reject a tampered release archive
+        shell: pwsh
+        run: ./scripts/test-installer-checksum.ps1 -Installer (Join-Path $env:RUNNER_TEMP 'trm-installer-acceptance/install.ps1') -Version $env:RELEASE_TAG
+      - name: Install, upgrade the previous binary, and restore its backup
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -80,6 +178,9 @@ jobs:
           $binary = Join-Path $installDir 'tokenresetsmonitor.exe'
           $config = Join-Path $dataDir 'config.yaml'
           $state = Join-Path $dataDir 'data/state.db'
+          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'trm-previous/tokenresetsmonitor.exe') -Destination $binary -Force
+          $previousVersion = & $binary version --json | ConvertFrom-Json
+          if ($previousVersion.version -ne $env:PREVIOUS_REF.Substring(1)) { throw 'Unexpected previous binary version.' }
           & $binary service start
           if ($LASTEXITCODE -ne 0) { throw 'Service start failed.' }
           Start-Sleep -Seconds 2
@@ -91,7 +192,13 @@ jobs:
           & $installer -Version $env:RELEASE_TAG -InstallDir $installDir -DataDir $dataDir -NoStart
           if ((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash -ne $beforeConfig) { throw 'Update changed configuration.' }
           if ((Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash -ne $beforeState) { throw 'Update changed stopped state.' }
-          if (@(Get-ChildItem -LiteralPath (Join-Path $dataDir 'backups') -Filter state.db -Recurse -File).Count -lt 1) { throw 'State backup is missing.' }
+          $backup = Get-ChildItem -LiteralPath (Join-Path $dataDir 'backups') -Directory | Sort-Object Name | Select-Object -Last 1
+          if ($null -eq $backup -or -not (Test-Path -LiteralPath (Join-Path $backup.FullName 'data/state.db'))) { throw 'State backup is missing.' }
+          $candidateVersion = & $binary version --json | ConvertFrom-Json
+          if ($candidateVersion.version -ne $env:RELEASE_TAG.Substring(1)) { throw 'Unexpected candidate binary version.' }
+          $candidateDir = Join-Path $env:RUNNER_TEMP 'trm-candidate'
+          New-Item -ItemType Directory -Path $candidateDir -Force | Out-Null
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $candidateDir 'tokenresetsmonitor.exe')
           & $binary service start
           if ($LASTEXITCODE -ne 0) { throw 'Restart failed.' }
           Start-Sleep -Seconds 2
@@ -99,9 +206,29 @@ jobs:
           & $binary service stop
           if ($LASTEXITCODE -ne 0) { throw 'Updated service stop failed.' }
           & $binary version
+          Copy-Item -LiteralPath (Join-Path $backup.FullName 'tokenresetsmonitor.exe') -Destination $binary -Force
+          Copy-Item -LiteralPath (Join-Path $backup.FullName 'config.yaml') -Destination $config -Force
+          Copy-Item -LiteralPath (Join-Path $backup.FullName 'data/state.db') -Destination $state -Force
+          Copy-Item -LiteralPath (Join-Path $backup.FullName 'data/state.db.status.json') -Destination ($state + '.status.json') -Force
+          if ((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash -ne $beforeConfig) { throw 'Rollback did not restore original configuration.' }
+          if ((Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash -ne $beforeState) { throw 'Rollback did not restore original state.' }
+          $restoredVersion = & $binary version --json | ConvertFrom-Json
+          if ($restoredVersion.version -ne $env:PREVIOUS_REF.Substring(1)) { throw 'Rollback did not restore the previous binary.' }
+          & $binary service start
+          if ($LASTEXITCODE -ne 0) { throw 'Rolled-back service start failed.' }
+          Start-Sleep -Seconds 2
+          if ((Get-Service TokenResetsMonitor).Status -ne 'Running') { throw 'Rolled-back service is not running.' }
+          & $binary service stop
+          if ($LASTEXITCODE -ne 0) { throw 'Rolled-back service stop failed.' }
           & $binary service uninstall
           if ($LASTEXITCODE -ne 0) { throw 'Service uninstall failed.' }
           if (-not (Test-Path -LiteralPath $config) -or -not (Test-Path -LiteralPath $state)) { throw 'Uninstall deleted persistent data.' }
+          Write-Host "Published $env:RELEASE_TAG installer upgraded source-built $env:PREVIOUS_REF and its backup restored the previous working service."
+      - name: Preserve a pending delivery across binary upgrade and rollback
+        env:
+          TRM_ACCEPTANCE_OLD_BINARY: ${{ runner.temp }}/trm-previous/tokenresetsmonitor.exe
+          TRM_ACCEPTANCE_NEW_BINARY: ${{ runner.temp }}/trm-candidate/tokenresetsmonitor.exe
+        run: go test -count=1 -v -timeout 2m ./internal/monitor -run TestBinaryUpgradeRollbackAcceptance
       - name: Show service diagnostics
         if: always()
         shell: pwsh
