@@ -2,7 +2,33 @@
 
 All notable changes are recorded here. This project follows [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.1.0-rc.1
+
+Release candidate for the 1.1 monitoring and notification features. Keep a pre-migration state backup when testing an upgrade from 1.0.
+
+### Added
+
+- Prometheus metrics, local/private-network health endpoints, and container liveness probes.
+- Guided Telegram pairing and Slack incoming webhook setup with hidden secret prompts, private backups, and optional TEST delivery.
+- Operational configuration reload with last-valid fallback and visible generation/reload status.
+- Read-only project update checks, explicit release compatibility manifests, and online/offline doctor diagnostics.
+- Expanded public onboarding, destination setup, configuration, observability, and upgrade guides.
+
+### Fixed
+
+- Reject missing/null pagination completion fields; bound complete history scans and preserve the newest event revision.
+- Persist destination-wide rate-limit cooldowns, including across restart, in state schema 2.
+- Apply private Windows ACLs to configuration files and backups; preserve secrets during setup and validation.
+- Validate webhook template execution and keep operational diagnostics useful when channel secrets are unavailable.
+- Validate installer candidates structurally with deferred service environment references; grant LocalService read access to private configuration and include all linked documentation and compatibility metadata in release archives.
+- Use consistent release candidate versions in native/Docker builds and preserve atomic configuration edits through directory mounts.
+
+### Compatibility
+
+- New configuration files use schema 2; version 1 remains readable without rewriting.
+- State migrates to schema 2 with a backup. Rollback to 1.0 requires a matching old-state backup.
+- Standard webhook payload remains schema 1. Background release metadata checks default to every 24 hours and can be disabled; no automatic installation occurs.
+
 
 ## 1.0.0 - 2026-09-08
 

@@ -61,7 +61,7 @@ func TestInvalidSettingsAreRedacted(t *testing.T) {
 func TestMigrationPreviewBackupAndFutureRefusal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	original := []byte("# keep this comment\nconfig_version: 0\nwebhook:\n  headers:\n    Authorization: '${TOKEN}'\n")
-	_ = os.WriteFile(path, original, 0600)
+	_ = WriteNewBytes(path, original)
 	if _, e := Migrate(path, false); e != nil {
 		t.Fatal(e)
 	}
@@ -149,7 +149,7 @@ func TestOversizedConfigAndURLQueryAreRejected(t *testing.T) {
 func TestMissingConfigurationVersionRequiresExplicitMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	original := []byte("poll_interval: 30m\n")
-	if err := os.WriteFile(path, original, 0600); err != nil {
+	if err := WriteNewBytes(path, original); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path, nil); err == nil || !strings.Contains(err.Error(), "migrate") {
@@ -158,7 +158,7 @@ func TestMissingConfigurationVersionRequiresExplicitMigration(t *testing.T) {
 	if _, err := Migrate(path, true); err != nil {
 		t.Fatal(err)
 	}
-	if cfg, err := Load(path, nil); err != nil || cfg.ConfigVersion != 1 {
+	if cfg, err := Load(path, nil); err != nil || cfg.ConfigVersion != Version {
 		t.Fatalf("explicit migration failed: %v", err)
 	}
 }

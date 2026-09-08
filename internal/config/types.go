@@ -14,6 +14,10 @@ type Config struct {
 	UnknownScope      string           `yaml:"unknown_scope" json:"unknown_scope"`
 	Webhook           Webhook          `yaml:"webhook" json:"webhook"`
 	Telegram          Telegram         `yaml:"telegram" json:"telegram"`
+	Slack             Slack            `yaml:"slack" json:"slack"`
+	Reload            Reload           `yaml:"reload" json:"reload"`
+	Observability     Observability    `yaml:"observability" json:"observability"`
+	Updates           Updates          `yaml:"updates" json:"updates"`
 	Logging           Logging          `yaml:"logging" json:"logging"`
 }
 
@@ -53,6 +57,24 @@ type Logging struct {
 	MaxAgeDays  int    `yaml:"max_age_days" json:"max_age_days"`
 }
 
+type Slack struct {
+	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	WebhookURL string `yaml:"webhook_url" json:"-"`
+	Timeout    string `yaml:"timeout" json:"timeout"`
+}
+type Reload struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+type Observability struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Listen  string `yaml:"listen" json:"listen"`
+}
+type Updates struct {
+	Enabled           bool   `yaml:"enabled" json:"enabled"`
+	Interval          string `yaml:"interval" json:"interval"`
+	IncludePrerelease bool   `yaml:"include_prerelease" json:"include_prerelease"`
+}
+
 func (c Config) PollDuration() time.Duration { d, _ := time.ParseDuration(c.PollInterval); return d }
 func (c Config) HTTPTimeout() time.Duration  { d, _ := time.ParseDuration(c.RequestTimeout); return d }
 func (c Config) EnabledChannels() []string {
@@ -62,6 +84,9 @@ func (c Config) EnabledChannels() []string {
 	}
 	if c.Telegram.Enabled {
 		channels = append(channels, "telegram")
+	}
+	if c.Slack.Enabled {
+		channels = append(channels, "slack")
 	}
 	return channels
 }

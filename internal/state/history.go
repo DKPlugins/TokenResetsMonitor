@@ -140,7 +140,7 @@ func (s *Store) CommitScan(slug string, incoming []model.Event, policy Policy, n
 		initial := !provider.Ready
 		seen := map[string]bool{}
 		for _, event := range incoming {
-			if event.ID == "" || event.Provider.Slug != slug {
+			if event.ID == "" || event.Provider.Slug != slug || event.Revision < 1 {
 				return errors.New("provider scan contains invalid event identity")
 			}
 			key := eventKey(slug, event.ID)
@@ -152,6 +152,15 @@ func (s *Store) CommitScan(slug string, incoming []model.Event, policy Policy, n
 			exists, err := getJSON(events, key, &record)
 			if err != nil {
 				return err
+			}
+			if exists && event.Revision < record.Event.Revision {
+				if !initial {
+					detections = append(detections, Detection{EventID: event.ID, Revision: event.Revision, Reason: "stale_revision"})
+					continue
+				}
+				// Reenabling still establishes a baseline from the newest known
+				// payload instead of overwriting it with an outdated replica.
+				event = record.Event
 			}
 			if exists && !initial && sameEvent(record.Event, event) {
 				continue
@@ -298,8 +307,28 @@ func (s *Store) MissingPending(slug string, incoming []model.Event) ([]model.Eve
 }
 
 func (s *Store) Status(running bool, now time.Time) (model.Status, error) {
-	status := model.Status{Running: running, UpdatedAt: now.UTC(), Providers: map[string]model.ProviderStatus{}}
-	err := s.db.View(func(tx *bolt.Tx) error {
+	status := model.Status{Running: running, UpdatedAt: now.UTC(), Providers: map[string]model.ProviderStatus{}, Channels: map[string]model.ChannelStatus{}}
+	runtime, err := s.runtimeStatus()
+	if err != nil {
+		return status, err
+	}
+	status.Runtime = runtime
+	err = s.db.View(func(tx *bolt.Tx) error {
+		var recipients map[string]string
+		if _, err := getJSON(tx.Bucket([]byte("meta")), "channels", &recipients); err != nil {
+			return err
+		}
+		for channel, destination := range recipients {
+			info := model.ChannelStatus{}
+			deadline, err := recipientCooldown(tx, channel, destination)
+			if err != nil {
+				return err
+			}
+			if deadline.After(now) {
+				info.CooldownUntil = timePointer(deadline)
+			}
+			status.Channels[channel] = info
+		}
 		if err := tx.Bucket([]byte("providers")).ForEach(func(k, v []byte) error {
 			var p providerRecord
 			if err := json.Unmarshal(v, &p); err != nil {
@@ -317,11 +346,34 @@ func (s *Store) Status(running bool, now time.Time) (model.Status, error) {
 			if err := json.Unmarshal(v, &d); err != nil {
 				return err
 			}
+			channel := status.Channels[d.Channel]
+			provider, active := status.Providers[d.Notification.Event.Provider.Slug]
 			switch d.Status {
 			case "pending":
 				status.Pending++
+				channel.Pending++
+				provider.Pending++
+				detected := d.Notification.DetectedAt
+				if !detected.IsZero() {
+					if channel.OldestPending == nil || detected.Before(*channel.OldestPending) {
+						channel.OldestPending = timePointer(detected)
+					}
+					if provider.OldestPending == nil || detected.Before(*provider.OldestPending) {
+						provider.OldestPending = timePointer(detected)
+					}
+				}
 			case "failed":
 				status.Failed++
+				channel.Failed++
+				provider.Failed++
+			case "delivered":
+				channel.Delivered++
+			case "canceled":
+				channel.Canceled++
+			}
+			status.Channels[d.Channel] = channel
+			if active {
+				status.Providers[d.Notification.Event.Provider.Slug] = provider
 			}
 			return nil
 		})

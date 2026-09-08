@@ -12,7 +12,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,7 +19,7 @@ import (
 	"github.com/DKPlugins/TokenResetsMonitor/internal/config"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/filter"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
-	"github.com/DKPlugins/TokenResetsMonitor/internal/notify"
+	"github.com/DKPlugins/TokenResetsMonitor/internal/observability"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/state"
 )
 
@@ -36,133 +35,20 @@ type sender interface {
 type sourceFailures struct{ error }
 
 type monitor struct {
-	store  *state.Store
-	source source
-	sender sender
-	policy state.Policy
-	logger *slog.Logger
-	cycles atomic.Uint64
-	clock  func() time.Time
+	store   *state.Store
+	source  source
+	sender  sender
+	policy  state.Policy
+	logger  *slog.Logger
+	cycles  atomic.Uint64
+	clock   func() time.Time
+	metrics *observability.Metrics
+	stop    <-chan struct{}
 }
 
-// Run polls immediately. Each enabled channel has its own durable worker, so a
-// slow or failing recipient does not stall another channel or the next scan.
+// Run polls immediately; CLI callers supply the configuration path through RunWithOptions.
 func Run(ctx context.Context, cfg config.Config, logger *slog.Logger, once bool) error {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	if cfg.PollDuration() <= 0 {
-		return errors.New("poll interval must be positive")
-	}
-	db, err := state.Open(cfg.StatePath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	policy := makePolicy(cfg)
-	if err := db.Reconcile(policy); err != nil {
-		return err
-	}
-	m := &monitor{store: db, source: api.New(cfg.APIBaseURL, cfg.HTTPTimeout(), db), sender: notify.New(cfg), policy: policy, logger: logger}
-	if err := db.PublishStatus(true, time.Now()); err != nil {
-		return err
-	}
-	defer func() {
-		if err := db.PublishStatus(false, time.Now()); err != nil {
-			logger.Error("Unable to publish stopped status")
-		}
-	}()
-	logger.Info("Monitor started", "providers", len(policy.Providers), "channels", len(policy.Channels), "once", once)
-	defer logger.Info("Monitor stopped")
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	if once {
-		pollErr := m.poll(ctx)
-		var wg sync.WaitGroup
-		errs := make(chan error, len(policy.Channels))
-		for channel := range policy.Channels {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				if err := m.deliver(ctx, channel, true); err != nil {
-					errs <- err
-				}
-			}()
-		}
-		wg.Wait()
-		close(errs)
-		for err := range errs {
-			pollErr = errors.Join(pollErr, err)
-		}
-		if ctx.Err() != nil {
-			return nil
-		}
-		return pollErr
-	}
-	fatal := make(chan error, len(policy.Channels)+1)
-	var workers sync.WaitGroup
-	for channel := range policy.Channels {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
-				if err := m.deliver(ctx, channel, false); err != nil {
-					fatal <- err
-					cancel()
-					return
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-				}
-			}
-		}()
-	}
-	workers.Add(1)
-	go func() {
-		defer workers.Done()
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := db.PublishStatus(true, time.Now()); err != nil {
-					fatal <- err
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	defer workers.Wait()
-	defer cancel()
-	if err := m.poll(ctx); err != nil && !recoverablePoll(err) && ctx.Err() == nil {
-		return err
-	}
-	ticker := time.NewTicker(cfg.PollDuration())
-	defer ticker.Stop()
-	for {
-		select {
-		case err := <-fatal:
-			return err
-		case <-ctx.Done():
-			select {
-			case err := <-fatal:
-				return err
-			default:
-				return nil
-			}
-		case <-ticker.C:
-			if err := m.poll(ctx); err != nil && !recoverablePoll(err) && ctx.Err() == nil {
-				return err
-			}
-		}
-	}
+	return RunWithOptions(ctx, cfg, logger, once, RunOptions{})
 }
 
 func recoverablePoll(err error) bool { var outage sourceFailures; return errors.As(err, &outage) }
@@ -198,47 +84,57 @@ func (m *monitor) poll(ctx context.Context) error {
 			continue
 		}
 		started := time.Now()
-		events, err := m.source.Events(ctx, slug)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		scanCtx = api.WithScanBudget(scanCtx)
+		events, sourceErr := m.source.Events(scanCtx, slug)
+		var detailNotBefore time.Time
+		if sourceErr == nil {
+			missing, err := m.store.MissingPending(slug, events)
+			if err != nil {
+				cancel()
+				return err
 			}
-			notBefore = retryDeadline(err, m.now())
-			if saveErr := m.store.MarkProviderError(slug, "Provider scan failed; see program logs", notBefore); saveErr != nil {
-				return saveErr
+			for _, old := range missing {
+				detail, err := m.source.Event(scanCtx, old.ID)
+				if err != nil {
+					if errors.Is(err, api.ErrScanBudget) {
+						sourceErr = err
+						break
+					}
+					detailNotBefore = retryDeadline(err, m.now())
+					if scanCtx.Err() != nil || !detailNotBefore.IsZero() {
+						break
+					}
+					continue
+				}
+				if detail.ID == old.ID && detail.Provider.Slug == slug && detail.Status == "retracted" {
+					events = append(events, detail)
+				}
 			}
-			m.logger.Warn("Provider scan failed", "cycle_id", cycle, "provider", slug, "error", safeSourceError(err))
+		}
+		if scanCtx.Err() != nil {
+			sourceErr = scanCtx.Err()
+		}
+		cancel()
+		// Quiescing a generation must never commit its interrupted scan.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if sourceErr != nil {
+			notBefore = retryDeadline(sourceErr, m.now())
+			if err := m.store.MarkProviderError(slug, "Provider scan failed; see program logs", notBefore); err != nil {
+				return err
+			}
+			m.metrics.ObserveScan(slug, time.Since(started), false)
+			m.logger.Warn("Provider scan failed", "cycle_id", cycle, "provider", slug, "error", safeSourceError(sourceErr))
 			if !notBefore.IsZero() {
 				m.logger.Warn("Provider polling paused by upstream Retry-After", "cycle_id", cycle, "provider", slug, "retry_at", notBefore, "delay", notBefore.Sub(m.now()))
 			}
 			failures = errors.Join(failures, fmt.Errorf("provider %s scan failed", slug))
 			continue
 		}
-		missing, err := m.store.MissingPending(slug, events)
-		if err != nil {
-			return err
-		}
-		var detailNotBefore time.Time
-		for _, old := range missing {
-			detail, err := m.source.Event(ctx, old.ID)
-			if err != nil {
-				m.logger.Debug("Missing event could not be verified; delivery remains unchanged", "cycle_id", cycle, "provider", slug, "event_id", old.ID)
-				detailNotBefore = retryDeadline(err, m.now())
-				if !detailNotBefore.IsZero() {
-					break
-				}
-				continue
-			}
-			if detail.ID == old.ID && detail.Provider.Slug == slug && detail.Status == "retracted" {
-				events = append(events, detail)
-			}
-		}
 		detections, err := m.store.CommitScan(slug, events, m.policy, m.now())
 		if err != nil {
-			if saveErr := m.store.MarkProviderError(slug, "Provider scan could not be committed", time.Time{}); saveErr != nil {
-				return saveErr
-			}
-			m.logger.Error("Provider scan could not be committed", "cycle_id", cycle, "provider", slug)
 			return fmt.Errorf("provider %s scan could not be committed: %w", slug, err)
 		}
 		if !detailNotBefore.IsZero() {
@@ -247,12 +143,17 @@ func (m *monitor) poll(ctx context.Context) error {
 			}
 			m.logger.Warn("Provider polling paused by upstream Retry-After", "cycle_id", cycle, "provider", slug, "retry_at", detailNotBefore, "delay", detailNotBefore.Sub(m.now()))
 		}
-		for _, detection := range detections {
-			m.logger.Info("Event discovered or revised", "cycle_id", cycle, "provider", slug, "event_id", detection.EventID, "revision", detection.Revision, "queued", detection.Queued)
-			if detection.Queued == 0 {
-				m.logger.Debug("Event produced no new notification", "cycle_id", cycle, "provider", slug, "event_id", detection.EventID, "reason", detection.Reason)
+		for _, d := range detections {
+			if d.Reason == "stale_revision" {
+				m.logger.Warn("Ignored older event revision", "provider", slug, "event_id", d.EventID, "reason", d.Reason)
+				continue
+			}
+			m.logger.Info("Event discovered or revised", "cycle_id", cycle, "provider", slug, "event_id", d.EventID, "revision", d.Revision, "queued", d.Queued)
+			if d.Queued == 0 {
+				m.logger.Debug("Event produced no new notification", "provider", slug, "event_id", d.EventID, "reason", d.Reason)
 			}
 		}
+		m.metrics.ObserveScan(slug, time.Since(started), detailNotBefore.IsZero())
 		m.logger.Info("Provider scan completed", "cycle_id", cycle, "provider", slug, "events", len(events), "duration", time.Since(started), "recovered", recovering && detailNotBefore.IsZero())
 	}
 	if err := m.store.PublishStatus(true, time.Now()); err != nil {
@@ -286,6 +187,11 @@ func (m *monitor) deliver(ctx context.Context, channel string, once bool) error 
 		if ctx.Err() != nil {
 			return nil
 		}
+		select {
+		case <-m.stop:
+			return nil
+		default:
+		}
 		// A scan may have canceled or updated an entry after Due's snapshot.
 		delivery, found, err := m.store.Delivery(queued.Notification.ID)
 		if err != nil {
@@ -294,11 +200,20 @@ func (m *monitor) deliver(ctx context.Context, channel string, once bool) error 
 		if !found || delivery.Status != "pending" {
 			continue
 		}
+		cooldown, err := m.store.RecipientCooldown(channel, delivery.Destination)
+		if err != nil {
+			return err
+		}
+		if time.Now().Before(cooldown) {
+			break
+		}
 		m.logger.Info("Notification attempt", "channel", channel, "notification_id", delivery.Notification.ID, "event_id", delivery.Notification.Event.ID, "attempt", delivery.Attempts+1)
 		result := m.sender.Send(ctx, channel, delivery.Notification)
-		if ctx.Err() != nil {
+		// An acknowledged request must be recorded even if shutdown raced with its response.
+		if ctx.Err() != nil && !result.Success {
 			return nil
-		} // Preserve pending work on shutdown.
+		}
+		m.metrics.ObserveDelivery(channel, result)
 		if err := m.store.Complete(delivery.Notification.ID, result, time.Now()); err != nil {
 			return err
 		}
@@ -344,6 +259,9 @@ func makePolicy(cfg config.Config) state.Policy {
 	}
 	if cfg.Telegram.Enabled {
 		policy.Channels["telegram"] = fingerprint(recipientURL(cfg.Telegram.APIBaseURL) + "\x00" + cfg.Telegram.ChatID + "\x00" + strconv.FormatInt(cfg.Telegram.MessageThreadID, 10))
+	}
+	if cfg.Slack.Enabled {
+		policy.Channels["slack"] = fingerprint(cfg.Slack.WebhookURL)
 	}
 	return policy
 }

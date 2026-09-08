@@ -30,7 +30,13 @@ func (s *Store) Due(channel string, now time.Time, limit int) ([]Delivery, error
 				return err
 			}
 			if d.Channel == channel && d.Status == "pending" && !d.NextAttempt.After(now) {
-				deliveries = append(deliveries, d)
+				deadline, err := recipientCooldown(tx, channel, d.Destination)
+				if err != nil {
+					return err
+				}
+				if !deadline.After(now) {
+					deliveries = append(deliveries, d)
+				}
 			}
 			return nil
 		})
@@ -65,6 +71,18 @@ func (s *Store) Complete(id string, result model.DeliveryResult, now time.Time) 
 		}
 		if !found {
 			return errors.New("delivery does not exist")
+		}
+		// Throttle all work for this recipient in the same transaction as the
+		// attempt result. A concurrent retraction may have canceled this entry,
+		// but the endpoint's cooldown still applies to its other notifications.
+		if !result.Success && (result.RetryAfter > 0 || result.StatusCode == 429 || result.RateLimited) {
+			delay := RetryDelay(d.Attempts + 1)
+			if result.RetryAfter > delay {
+				delay = result.RetryAfter
+			}
+			if err := extendRecipientCooldown(tx, d.Channel, d.Destination, now.UTC().Add(delay)); err != nil {
+				return err
+			}
 		}
 		if d.Status != "pending" {
 			return nil

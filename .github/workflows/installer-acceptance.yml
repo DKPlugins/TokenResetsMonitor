@@ -6,12 +6,12 @@ on:
       version:
         description: Published candidate tag to install and upgrade in disposable runners
         required: true
-        default: v1.0.0
+        default: v1.1.0-rc.1
         type: string
       previous_ref:
         description: Previous immutable Git tag to build for installer upgrade and backup rollback
         required: true
-        default: v1.0.0-rc.4
+        default: v1.0.0
         type: string
 
 permissions:
@@ -68,10 +68,22 @@ jobs:
           set -eu
           installer="$RUNNER_TEMP/trm-installer-acceptance/install.sh"
           sudo env TRM_API_BASE_URL=http://127.0.0.1:1/api/v1 sh "$installer" --version "$RELEASE_TAG" --no-start
-          # The candidate installs service paths/ACLs; its stopped executable is
-          # replaced with a binary built from the actual previous Git tag.
+          # The candidate establishes paths/permissions. Seed configuration with
+          # the previous binary: a fresh candidate config has schema 2/new fields.
+          sudo env TRM_API_BASE_URL=http://127.0.0.1:1/api/v1 \
+            TRM_STATE_PATH=/var/lib/tokenresetsmonitor/state.db TRM_LOGGING_FORMAT=json \
+            TRM_LOGGING_FILE_ENABLED=true TRM_LOGGING_DIRECTORY=/var/log/tokenresetsmonitor \
+            "$RUNNER_TEMP/trm-previous/tokenresetsmonitor" init --defaults --config "$RUNNER_TEMP/trm-previous/config.yaml"
+          sudo install -o root -g tokenresetsmonitor -m 640 "$RUNNER_TEMP/trm-previous/config.yaml" /etc/tokenresetsmonitor/config.yaml
+          sudo grep -Eq '^config_version: 1$' /etc/tokenresetsmonitor/config.yaml
+          printf '%s\n' 'TRM_UPDATES_ENABLED=false' | sudo tee /etc/tokenresetsmonitor/environment >/dev/null
+          sudo chmod 600 /etc/tokenresetsmonitor/environment
+          # Only the candidate understands --structural. The old binary below
+          # uses ordinary validation against the same legacy configuration.
+          sudo tokenresetsmonitor config validate --structural --config /etc/tokenresetsmonitor/config.yaml
           sudo install -m 755 "$RUNNER_TEMP/trm-previous/tokenresetsmonitor" /usr/local/bin/tokenresetsmonitor
           test "$(tokenresetsmonitor version --json | jq -r .version)" = "${PREVIOUS_REF#v}"
+          sudo tokenresetsmonitor config validate --config /etc/tokenresetsmonitor/config.yaml
           sudo systemctl start tokenresetsmonitor
           sleep 2
           sudo systemctl is-active --quiet tokenresetsmonitor
@@ -89,8 +101,20 @@ jobs:
           sudo systemctl start tokenresetsmonitor
           sleep 2
           sudo systemctl is-active --quiet tokenresetsmonitor
-          sudo tokenresetsmonitor status --json --config /etc/tokenresetsmonitor/config.yaml
+          sudo tokenresetsmonitor status --json --config /etc/tokenresetsmonitor/config.yaml |
+            jq -e --arg expected "${RELEASE_TAG#v}" '.running and .runtime.version == $expected and .runtime.state_schema_version == 2'
           sudo systemctl stop tokenresetsmonitor
+          migration_backup=$(sudo find /var/lib/tokenresetsmonitor -maxdepth 1 -name 'state.db.backup-*' -type f -print)
+          test "$(printf '%s\n' "$migration_backup" | wc -l)" -eq 1
+          sudo test -s "$migration_backup"
+          sudo sha256sum /var/lib/tokenresetsmonitor/state.db | tee "$RUNNER_TEMP/trm-migrated.sha256"
+          if refusal=$(sudo "$RUNNER_TEMP/trm-previous/tokenresetsmonitor" run --once --config /etc/tokenresetsmonitor/config.yaml 2>&1); then
+            echo 'Previous binary unexpectedly accepted migrated schema 2.' >&2
+            exit 1
+          fi
+          printf '%s\n' "$refusal" > "$RUNNER_TEMP/trm-schema-refusal.txt"
+          grep -Fq 'state schema 2 is newer than supported schema 1' "$RUNNER_TEMP/trm-schema-refusal.txt"
+          sudo sha256sum --check "$RUNNER_TEMP/trm-migrated.sha256"
           tokenresetsmonitor version
           # Explicit rollback uses the installer's real backup, including its
           # old executable, configuration, database and operational snapshot.
@@ -100,6 +124,7 @@ jobs:
           sudo cp -p "$backup/data/state.db.status.json" /var/lib/tokenresetsmonitor/state.db.status.json
           sudo sha256sum --check "$RUNNER_TEMP/trm-before.sha256"
           test "$(tokenresetsmonitor version --json | jq -r .version)" = "${PREVIOUS_REF#v}"
+          sudo tokenresetsmonitor config validate --config /etc/tokenresetsmonitor/config.yaml
           sudo systemctl start tokenresetsmonitor
           sleep 2
           sudo systemctl is-active --quiet tokenresetsmonitor
@@ -178,9 +203,40 @@ jobs:
           $binary = Join-Path $installDir 'tokenresetsmonitor.exe'
           $config = Join-Path $dataDir 'config.yaml'
           $state = Join-Path $dataDir 'data/state.db'
-          Copy-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'trm-previous/tokenresetsmonitor.exe') -Destination $binary -Force
+          function Assert-ServiceConfigurationAccess {
+            $acl = Get-Acl -LiteralPath $config
+            if (-not $acl.AreAccessRulesProtected) { throw 'Configuration inherited broad permissions.' }
+            $rules = @($acl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-19' })
+            if ($rules.Count -ne 1 -or ($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::Read) -ne [Security.AccessControl.FileSystemRights]::Read) { throw 'LocalService lacks configuration Read.' }
+            if (($rules[0].FileSystemRights -band [Security.AccessControl.FileSystemRights]::WriteData) -ne 0) { throw 'LocalService may write configuration.' }
+          }
+          Assert-ServiceConfigurationAccess
+          if ((Get-CimInstance Win32_Service -Filter "Name='TokenResetsMonitor'").StartName -ne 'NT AUTHORITY\LocalService') { throw 'Unexpected service account.' }
+          $previousBinary = Join-Path $env:RUNNER_TEMP 'trm-previous/tokenresetsmonitor.exe'
+          $legacyConfig = Join-Path $env:RUNNER_TEMP 'trm-previous/config.yaml'
+          $env:TRM_STATE_PATH = $state
+          $env:TRM_LOGGING_FORMAT = 'json'
+          $env:TRM_LOGGING_FILE_ENABLED = 'true'
+          $env:TRM_LOGGING_DIRECTORY = Join-Path $dataDir 'logs'
+          try {
+            & $previousBinary init --defaults --config $legacyConfig
+            if ($LASTEXITCODE -ne 0) { throw 'Previous configuration initialization failed.' }
+          } finally {
+            foreach ($name in @('TRM_STATE_PATH', 'TRM_LOGGING_FORMAT', 'TRM_LOGGING_FILE_ENABLED', 'TRM_LOGGING_DIRECTORY')) {
+              Remove-Item -LiteralPath ('Env:\' + $name) -ErrorAction SilentlyContinue
+            }
+          }
+          # Write into the existing protected file without replacing its service ACL.
+          [IO.File]::WriteAllBytes($config, [IO.File]::ReadAllBytes($legacyConfig))
+          if (-not (Select-String -LiteralPath $config -Pattern '^config_version: 1$' -Quiet)) { throw 'Expected legacy configuration schema 1.' }
+          New-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\TokenResetsMonitor' -Name Environment -PropertyType MultiString -Value @('TRM_UPDATES_ENABLED=false') -Force | Out-Null
+          & $binary config validate --structural --config $config
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate structural validation rejected legacy configuration.' }
+          Copy-Item -LiteralPath $previousBinary -Destination $binary -Force
           $previousVersion = & $binary version --json | ConvertFrom-Json
           if ($previousVersion.version -ne $env:PREVIOUS_REF.Substring(1)) { throw 'Unexpected previous binary version.' }
+          & $binary config validate --config $config
+          if ($LASTEXITCODE -ne 0) { throw 'Previous binary rejected its own configuration.' }
           & $binary service start
           if ($LASTEXITCODE -ne 0) { throw 'Service start failed.' }
           Start-Sleep -Seconds 2
@@ -192,6 +248,7 @@ jobs:
           & $installer -Version $env:RELEASE_TAG -InstallDir $installDir -DataDir $dataDir -NoStart
           if ((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash -ne $beforeConfig) { throw 'Update changed configuration.' }
           if ((Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash -ne $beforeState) { throw 'Update changed stopped state.' }
+          Assert-ServiceConfigurationAccess
           $backup = Get-ChildItem -LiteralPath (Join-Path $dataDir 'backups') -Directory | Sort-Object Name | Select-Object -Last 1
           if ($null -eq $backup -or -not (Test-Path -LiteralPath (Join-Path $backup.FullName 'data/state.db'))) { throw 'State backup is missing.' }
           $candidateVersion = & $binary version --json | ConvertFrom-Json
@@ -203,8 +260,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Restart failed.' }
           Start-Sleep -Seconds 2
           if ((Get-Service TokenResetsMonitor).Status -ne 'Running') { throw 'Updated service is not running.' }
+          $status = & $binary status --json --config $config | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $status.running -or $status.runtime.state_schema_version -ne 2 -or $status.runtime.version -ne $env:RELEASE_TAG.Substring(1)) { throw 'Candidate did not publish migrated schema 2.' }
           & $binary service stop
           if ($LASTEXITCODE -ne 0) { throw 'Updated service stop failed.' }
+          $migrationBackups = @(Get-ChildItem -LiteralPath (Split-Path $state -Parent) -Filter 'state.db.backup-*' -File)
+          if ($migrationBackups.Count -ne 1 -or $migrationBackups[0].Length -eq 0) { throw 'Automatic pre-migration backup is missing.' }
+          $migratedHash = (Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash
+          $refusalPath = Join-Path $env:RUNNER_TEMP 'trm-schema-refusal.txt'
+          try {
+            $ErrorActionPreference = 'Continue'
+            & $previousBinary run --once --config $config *> $refusalPath
+            $refusalExit = $LASTEXITCODE
+          } finally { $ErrorActionPreference = 'Stop' }
+          if ($refusalExit -ne 1 -or [IO.File]::ReadAllText($refusalPath) -notmatch 'state schema 2 is newer than supported schema 1') { throw 'Previous binary did not refuse migrated schema 2.' }
+          if ((Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash -ne $migratedHash) { throw 'Previous binary modified unsupported state.' }
           & $binary version
           Copy-Item -LiteralPath (Join-Path $backup.FullName 'tokenresetsmonitor.exe') -Destination $binary -Force
           Copy-Item -LiteralPath (Join-Path $backup.FullName 'config.yaml') -Destination $config -Force
@@ -212,6 +282,7 @@ jobs:
           Copy-Item -LiteralPath (Join-Path $backup.FullName 'data/state.db.status.json') -Destination ($state + '.status.json') -Force
           if ((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash -ne $beforeConfig) { throw 'Rollback did not restore original configuration.' }
           if ((Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash -ne $beforeState) { throw 'Rollback did not restore original state.' }
+          Assert-ServiceConfigurationAccess
           $restoredVersion = & $binary version --json | ConvertFrom-Json
           if ($restoredVersion.version -ne $env:PREVIOUS_REF.Substring(1)) { throw 'Rollback did not restore the previous binary.' }
           & $binary service start

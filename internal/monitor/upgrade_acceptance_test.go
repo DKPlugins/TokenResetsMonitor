@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DKPlugins/TokenResetsMonitor/internal/config"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
 )
 
@@ -82,19 +81,23 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 		}
 		return output
 	}
-	version := func(binary string) map[string]string {
+	type binaryVersion struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	}
+	version := func(binary string) binaryVersion {
 		t.Helper()
-		var result map[string]string
+		var result binaryVersion
 		if err := json.Unmarshal(run(binary, 0, "version", "--json"), &result); err != nil {
 			t.Fatal("invalid binary version output", err)
 		}
-		if result["version"] == "" || result["commit"] == "" || result["commit"] == "development" {
+		if result.Version == "" || result.Commit == "" || result.Commit == "development" {
 			t.Fatal("acceptance binaries must contain version and source commit metadata")
 		}
 		return result
 	}
 	oldVersion, newVersion := version(oldPath), version(newPath)
-	if oldVersion["version"] == newVersion["version"] {
+	if oldVersion.Version == newVersion.Version {
 		t.Fatal("cross-version acceptance requires different application versions")
 	}
 	checksum := func(path string) string {
@@ -110,8 +113,8 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 		}
 		return hex.EncodeToString(hash.Sum(nil))
 	}
-	t.Logf("old version=%s commit=%s sha256=%s", oldVersion["version"], oldVersion["commit"], checksum(oldPath))
-	t.Logf("new version=%s commit=%s sha256=%s", newVersion["version"], newVersion["commit"], checksum(newPath))
+	t.Logf("old version=%s commit=%s sha256=%s", oldVersion.Version, oldVersion.Commit, checksum(oldPath))
+	t.Logf("new version=%s commit=%s sha256=%s", newVersion.Version, newVersion.Commit, checksum(newPath))
 
 	fixtureEvent := func(id string) model.Event {
 		return model.Event{ID: id, Slug: id, Provider: model.Provider{Slug: "openai-codex", Name: "Codex"},
@@ -153,19 +156,29 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cfg := config.Defaults()
-	cfg.APIBaseURL = server.URL + "/api/v1"
-	cfg.StatePath = filepath.Join(workspace, "state.db")
-	cfg.Providers = []config.ProviderFilter{{Slug: "openai-codex"}}
-	cfg.Webhook.Enabled = true
-	cfg.Webhook.URL = server.URL + "/webhook"
-	cfg.Webhook.Timeout = "5s"
-	cfg.Telegram.Enabled = false
-	cfg.Logging.FileEnabled = false
+	statePath := filepath.Join(workspace, "state.db")
 	configPath := filepath.Join(workspace, "config.yaml")
-	if err := config.WriteNew(configPath, cfg); err != nil {
+	// Keep this fixture at the actual previous contract. Marshaling current
+	// Defaults would introduce schema 2 and fields the 1.0 validator rejects.
+	legacyConfig := fmt.Sprintf(`config_version: 1
+api_base_url: %q
+state_path: %q
+providers:
+  - slug: openai-codex
+webhook:
+  enabled: true
+  url: %q
+  timeout: 5s
+telegram:
+  enabled: false
+logging:
+  file_enabled: false
+`, server.URL+"/api/v1", statePath, server.URL+"/webhook")
+	if err := os.WriteFile(configPath, []byte(legacyConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
+	run(oldPath, 0, "config", "validate", "--config", configPath)
+	run(newPath, 0, "config", "validate", "--structural", "--config", configPath)
 	status := func(binary string) model.Status {
 		t.Helper()
 		var result model.Status
@@ -202,7 +215,7 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 	// The child exited before copying. These are real stopped-process backups;
 	// no test code opens, migrates, or rewrites bbolt records directly.
 	backup := make(map[string][]byte)
-	for _, path := range []string{cfg.StatePath, cfg.StatePath + ".status.json", configPath} {
+	for _, path := range []string{statePath, statePath + ".status.json", configPath} {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -216,6 +229,9 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 	for {
 		run(newPath, 0, "run", "--once", "--config", configPath)
 		current := status(newPath)
+		if current.Runtime == nil || current.Runtime.StateSchemaVersion != 2 {
+			t.Fatal("candidate did not publish migrated state schema 2")
+		}
 		if current.Pending == 0 {
 			assertStopped(current, 0)
 			break
@@ -239,9 +255,26 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 	if data, err := os.ReadFile(configPath); err != nil || !bytes.Equal(data, backup[configPath]) {
 		t.Fatal("upgrade unexpectedly changed the compatible configuration")
 	}
-	// A rollback restores the database matching the old binary. The restored
-	// pending message is intentionally resent, proving why receivers must dedupe
-	// Idempotency-Key even after an operator restores a backup.
+	migrationBackups, err := filepath.Glob(statePath + ".backup-*")
+	if err != nil || len(migrationBackups) != 1 {
+		t.Fatalf("expected one automatic pre-migration state backup, got %d: %v", len(migrationBackups), err)
+	}
+	beforeRefusal := checksum(statePath)
+	refusal := run(oldPath, 1, "run", "--once", "--config", configPath)
+	if !bytes.Contains(refusal, []byte("state schema 2 is newer than supported schema 1")) {
+		t.Fatal("previous binary did not explicitly reject migrated state")
+	}
+	if checksum(statePath) != beforeRefusal {
+		t.Fatal("previous binary modified unsupported migrated state")
+	}
+	// Use the application's automatic pre-migration database backup with the
+	// stopped original configuration/snapshot. No test rewrites database records.
+	backup[statePath], err = os.ReadFile(migrationBackups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Restored pending work is intentionally resent, proving why receivers must
+	// deduplicate Idempotency-Key even after an operator restores a backup.
 	for path, data := range backup {
 		if err := os.WriteFile(path, data, 0600); err != nil {
 			t.Fatal(err)
@@ -256,5 +289,5 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 	if len(notifications) != 3 || idempotencyKeys[2] != firstID || notifications[2].DetectedAt != notifications[0].DetectedAt {
 		t.Fatalf("rollback did not preserve deduplication identity: requests=%d", len(notifications))
 	}
-	t.Log(fmt.Sprintf("ACCEPTED upgrade %s -> %s and restored-backup rollback: pending=1 -> 0 -> restored 1 -> 0; requests=3; stable Idempotency-Key=%s; baseline was never replayed", oldVersion["version"], newVersion["version"], firstID))
+	t.Log(fmt.Sprintf("ACCEPTED upgrade %s -> %s and restored-backup rollback: pending=1 -> 0 -> restored 1 -> 0; requests=3; stable Idempotency-Key=%s; baseline was never replayed", oldVersion.Version, newVersion.Version, firstID))
 }

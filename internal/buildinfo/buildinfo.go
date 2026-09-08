@@ -1,6 +1,6 @@
 package buildinfo
 
-// These variables are set by the release build, from the immutable Git tag.
-var Version = "1.0.0"
+// These variables are set by release builds from their immutable Git tag.
+var Version = "1.1.0-rc.1"
 var Commit = "development"
 var Date = "unknown"

@@ -16,8 +16,10 @@ import (
 	"github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/config"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/logging"
+	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/monitor"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/notify"
+	"github.com/DKPlugins/TokenResetsMonitor/internal/observability"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/platform"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/state"
 )
@@ -28,14 +30,18 @@ Usage: tokenresetsmonitor <command> [options]
 
   init                         Interactive configuration wizard
   init --defaults              Write defaults without prompting
+  setup telegram|slack        Connect a notification destination
   config validate              Validate configuration
   config migrate [--apply]     Preview/apply a configuration migration
   run [--once]                 Monitor continuously or run one cycle
   status                       Show the latest daemon status snapshot
-  test-notification <channel>  Send a TEST notification (webhook|telegram|all)
+  test-notification <channel>  Send a TEST notification (webhook|telegram|slack|all)
   logs export                  Export redacted diagnostics locally
   deliveries retry-failed      Requeue failed deliveries while stopped
   service <action>             Windows service install/start/stop/status/uninstall
+  healthcheck [--ready]        Check local daemon health without secrets
+  check-update                 Check releases and declared compatibility
+  doctor [--offline]           Diagnose configuration, state and source API
   version                      Show build information
 
 Common options: --config PATH --state-path PATH --poll-interval 30m --log-level info
@@ -45,19 +51,24 @@ Use README.md for configuration, service installation and upgrade instructions.
 `
 
 type options struct {
-	configPath   string
-	statePath    string
-	pollInterval string
-	logLevel     string
-	once         bool
-	dryRun       bool
-	defaults     bool
-	apply        bool
-	provider     string
-	since        string
-	output       string
-	input        string
-	json         bool
+	configPath        string
+	statePath         string
+	pollInterval      string
+	logLevel          string
+	once              bool
+	dryRun            bool
+	defaults          bool
+	apply             bool
+	provider          string
+	since             string
+	output            string
+	input             string
+	json              bool
+	ready             bool
+	offline           bool
+	includePrerelease bool
+	structural        bool
+	logDirectory      string
 }
 
 func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
@@ -65,13 +76,23 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 		fmt.Fprint(out, help)
 		return 0
 	}
+	if args[0] == "compatibility-manifest" {
+		if len(args) != 1 {
+			return 2
+		}
+		return writeManifest(out)
+	}
 	if args[0] == "version" || args[0] == "--version" {
+		if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+			fmt.Fprintln(out, "Usage: tokenresetsmonitor version [--json]\nShow application version, commit and compatibility schema information.")
+			return 0
+		}
 		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
 			fmt.Fprintln(errOut, "Invalid version arguments; use version [--json].")
 			return 2
 		}
 		if len(args) > 1 && args[1] == "--json" {
-			_ = json.NewEncoder(out).Encode(map[string]string{"version": buildinfo.Version, "commit": buildinfo.Commit, "date": buildinfo.Date})
+			_ = json.NewEncoder(out).Encode(map[string]any{"version": buildinfo.Version, "commit": buildinfo.Commit, "date": buildinfo.Date, "compatibility": buildinfo.CurrentManifest()})
 		} else {
 			fmt.Fprintf(out, "TokenResetsMonitor %s (%s, %s)\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date)
 		}
@@ -80,12 +101,12 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	command := args[0]
 	rest := args[1:]
 	if len(rest) == 1 && (rest[0] == "--help" || rest[0] == "-h") {
-		fmt.Fprint(out, help)
+		printCommandHelp(command, "", out)
 		return 0
 	}
 	sub := ""
 	switch command {
-	case "config", "test-notification", "logs", "deliveries", "service":
+	case "config", "test-notification", "logs", "deliveries", "service", "setup":
 		if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
 			fmt.Fprintln(errOut, "A subcommand/channel is required.")
 			return 2
@@ -105,28 +126,43 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	fs.StringVar(&opts.pollInterval, "poll-interval", "", "poll interval")
 	fs.StringVar(&opts.logLevel, "log-level", "", "log level")
 	switch command {
+	case "setup":
 	case "init":
 		fs.BoolVar(&opts.defaults, "defaults", false, "write defaults")
 	case "run":
 		fs.BoolVar(&opts.once, "once", false, "one scan and delivery pass")
 	case "config":
 		fs.BoolVar(&opts.apply, "apply", false, "apply migration")
+		if sub == "validate" {
+			fs.BoolVar(&opts.structural, "structural", false, "defer unavailable service environment references")
+		}
 	case "test-notification":
 		fs.BoolVar(&opts.dryRun, "dry-run", false, "validate without sending")
 		fs.StringVar(&opts.provider, "provider", "", "synthetic event provider")
 	case "logs":
+		fs.StringVar(&opts.logDirectory, "log-directory", "", "log directory when configuration is unavailable")
 		fs.StringVar(&opts.since, "since", "24h", "collection period")
 		fs.StringVar(&opts.output, "output", "diagnostics.zip", "new archive path")
 		fs.StringVar(&opts.input, "input", "", "structured logs file or -")
-	case "status":
+	case "status", "healthcheck", "check-update", "doctor":
 		fs.BoolVar(&opts.json, "json", false, "JSON output")
+		if command == "healthcheck" {
+			fs.BoolVar(&opts.ready, "ready", false, "require recent successful provider scans")
+		}
+		if command == "doctor" {
+			fs.BoolVar(&opts.offline, "offline", false, "skip all network checks")
+		}
+		if command == "check-update" {
+			fs.BoolVar(&opts.includePrerelease, "include-prerelease", false, "also consider prereleases")
+		}
+
 	case "service", "deliveries":
 	default:
 		fmt.Fprintln(errOut, "Unknown command. Use --help.")
 		return 2
 	}
 	if e := fs.Parse(rest); errors.Is(e, flag.ErrHelp) {
-		fmt.Fprint(out, help)
+		printCommandHelp(command, sub, out)
 		return 0
 	} else if e != nil || fs.NArg() != 0 {
 		fmt.Fprintln(errOut, "Invalid arguments. Use --help.")
@@ -151,6 +187,23 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 		fmt.Fprintln(errOut, "--apply is only valid for config migrate.")
 		return 2
 	}
+	if command == "config" && sub == "validate" && opts.structural {
+		return validateInstallation(opts.configPath, overrides, out, errOut)
+	}
+	if command == "healthcheck" {
+		return healthcheck(opts, out, errOut)
+	}
+	if command == "setup" {
+		if len(overrides) > 0 {
+			fmt.Fprintln(errOut, "Setup saves configuration; edit runtime overrides separately.")
+			return 2
+		}
+		if e := setupChannel(ctx, opts, sub, in, out); e != nil {
+			fmt.Fprintln(errOut, e)
+			return 2
+		}
+		return 0
+	}
 	if command == "init" {
 		if e := initialize(ctx, opts, overrides, in, out); e != nil {
 			fmt.Fprintln(errOut, e)
@@ -174,13 +227,8 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 			return 2
 		}
 		if sub == "install" {
-			cfg, e := config.Load(configPath, nil)
-			if e == nil {
-				e = config.Validate(cfg)
-			}
-			if e != nil {
-				fmt.Fprintln(errOut, e)
-				return 2
+			if code := validateInstallation(configPath, nil, out, errOut); code != 0 {
+				return code
 			}
 		}
 		exe, e := os.Executable()
@@ -195,50 +243,88 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	}
 	if command == "run" {
 		run := func(runCtx context.Context) (runError error) {
-			cfg, e := config.Load(opts.configPath, overrides)
-			if e != nil {
-				return &configError{e}
+			cfg, err := config.Load(opts.configPath, overrides)
+			if err != nil {
+				return &configError{err}
 			}
-			if e = config.Validate(cfg); e != nil {
-				return &configError{e}
+			if err = config.Validate(cfg); err != nil {
+				return &configError{err}
 			}
-			logger, closeFn, e := logging.New(cfg, out, errOut)
-			if e != nil {
-				return e
+			logger, control, closeFn, err := logging.NewRuntime(cfg, out, errOut)
+			if err != nil {
+				return err
 			}
 			defer func() { runError = errors.Join(runError, closeFn()) }()
 			logger = logger.With("version", buildinfo.Version, "commit", buildinfo.Commit, "run_id", fmt.Sprintf("%d", time.Now().UnixNano()))
-			return monitor.Run(runCtx, cfg, logger, opts.once)
+			return monitor.RunWithOptions(runCtx, cfg, logger, opts.once, monitor.RunOptions{ConfigPath: opts.configPath, Overrides: overrides, OnReload: control.Apply})
 		}
-		handled, e := platform.Run(ctx, run)
-		if !handled && e == nil {
-			e = run(ctx)
+		handled, err := platform.Run(ctx, run)
+		if !handled && err == nil {
+			err = run(ctx)
 		}
-		if e != nil && !errors.Is(e, context.Canceled) {
-			fmt.Fprintln(errOut, "Monitor failed:", e)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintln(errOut, "Monitor failed:", err)
 			var ce *configError
-			if errors.As(e, &ce) {
+			if errors.As(err, &ce) {
 				return 2
 			}
 			return 1
 		}
 		return 0
 	}
-	cfg, e := config.Load(opts.configPath, overrides)
+	var cfg config.Config
+	var e error
+	operational := command == "status" || command == "logs"
+	if operational {
+		cfg, e = loadOperational(opts, overrides)
+	} else if command == "check-update" {
+		cfg, e = config.LoadStructural(opts.configPath, overrides)
+	} else {
+		cfg, e = config.Load(opts.configPath, overrides)
+	}
+	if command == "check-update" {
+		if e != nil {
+			if _, statErr := os.Stat(opts.configPath); errors.Is(statErr, os.ErrNotExist) {
+				cfg = config.Defaults()
+				e = nil
+			}
+		}
+		if e == nil {
+			if opts.includePrerelease {
+				cfg.Updates.IncludePrerelease = true
+			}
+			return checkUpdate(ctx, cfg, opts.json, out, errOut)
+		}
+	}
+	if command == "doctor" {
+		loadErr := e
+		if e != nil {
+			if operationalCfg, opErr := loadOperational(opts, overrides); opErr == nil {
+				cfg = operationalCfg
+			} else {
+				cfg = config.Defaults()
+				if opts.statePath != "" {
+					cfg.StatePath = opts.statePath
+				}
+			}
+		}
+		return doctor(ctx, cfg, opts.json, !opts.offline, out, errOut, loadErr)
+	}
 	if e != nil {
 		fmt.Fprintln(errOut, e)
 		return 2
 	}
 	validation := cfg
 	if command == "test-notification" {
-		// Validate destinations independently below so a broken channel does not
-		// prevent testing another channel or turn a render error into delivery error.
 		validation.Webhook.Enabled = false
 		validation.Telegram.Enabled = false
+		validation.Slack.Enabled = false
 	}
-	if e = config.Validate(validation); e != nil {
-		fmt.Fprintln(errOut, e)
-		return 2
+	if !operational {
+		if e = config.Validate(validation); e != nil {
+			fmt.Fprintln(errOut, e)
+			return 2
+		}
 	}
 	switch command {
 	case "config":
@@ -257,11 +343,28 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 			return 1
 		}
 		if opts.json {
-			_ = json.NewEncoder(out).Encode(status)
+			_ = json.NewEncoder(out).Encode(struct {
+				modelStatus
+				Health             observability.HealthResult `json:"health"`
+				SnapshotAgeSeconds float64                    `json:"snapshot_age_seconds"`
+			}{modelStatus: status, Health: observability.Health(status, time.Now(), true), SnapshotAgeSeconds: time.Since(status.UpdatedAt).Seconds()})
 		} else {
 			fmt.Fprintf(out, "Running: %t | Pending: %d | Failed: %d | Updated: %s\n", status.Running, status.Pending, status.Failed, status.UpdatedAt.UTC().Format(time.RFC3339))
 			if time.Since(status.UpdatedAt) > time.Minute {
 				fmt.Fprintln(out, "Status snapshot is stale; the process may have stopped unexpectedly.")
+			}
+			if r := status.Runtime; r != nil {
+				fmt.Fprintf(out, "Configuration: generation=%d reload_pending=%t last_reload_successful=%t\n", r.ConfigGeneration, r.ReloadPending, r.LastReloadSuccessful)
+				if r.ReloadError != "" {
+					fmt.Fprintln(out, "Reload:", r.ReloadError)
+				}
+				if u := r.Updates; u != nil {
+					if u.Error != "" {
+						fmt.Fprintln(out, "Update check unavailable; try check-update for details.")
+					} else {
+						fmt.Fprintf(out, "Updates: available=%t compatibility=%s checked=%s\n", u.UpdateAvailable, u.Compatibility, u.CheckedAt.Format(time.RFC3339))
+					}
+				}
 			}
 			for name, p := range status.Providers {
 				last := "never"
@@ -350,3 +453,6 @@ func testNotification(ctx context.Context, cfg config.Config, opts options, chan
 	}
 	return exitCode
 }
+
+// Alias preserves the existing top-level status JSON fields.
+type modelStatus = model.Status

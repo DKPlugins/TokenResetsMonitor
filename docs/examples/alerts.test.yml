@@ -1,0 +1,35 @@
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tokenresetsmonitor",instance="monitor:9090"}'
+        values: '0x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: TokenResetsMonitorDown
+        exp_alerts:
+          - exp_labels:
+              job: tokenresetsmonitor
+              instance: monitor:9090
+              severity: critical
+            exp_annotations:
+              summary: TokenResetsMonitor metrics are unreachable
+              description: Check the daemon, monitoring network, and configured scrape target.
+  - interval: 1m
+    input_series:
+      - series: 'tokenresetsmonitor_provider_last_success_timestamp_seconds{job="tokenresetsmonitor",instance="monitor:9090",provider="fixture"}'
+        values: '1000x180'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: TokenResetsMonitorSourceStale
+        exp_alerts:
+          - exp_labels:
+              job: tokenresetsmonitor
+              instance: monitor:9090
+              provider: fixture
+              severity: warning
+            exp_annotations:
+              summary: A TokenResets provider has no recent successful scan
+              description: The last complete scan is more than two hours old; inspect API failures and source cooldowns.

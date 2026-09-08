@@ -2,8 +2,9 @@
 
 package logging
 
-import "os"
+import (
+	"github.com/DKPlugins/TokenResetsMonitor/internal/fileio"
+	"os"
+)
 
-func createPrivateArchive(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-}
+func createPrivateArchive(path string) (*os.File, error) { return fileio.CreatePrivate(path) }

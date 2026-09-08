@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^v\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$')]
-    [string]$Version = 'v1.0.0',
+    [string]$Version = 'v1.1.0-rc.1',
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'TokenResetsMonitor'),
     [string]$DataDir = (Join-Path $env:ProgramData 'TokenResetsMonitor'),
     [switch]$NoStart
@@ -43,11 +43,46 @@ function Invoke-WithTemporaryEnvironment {
     }
 }
 
+function ConvertFrom-ServiceEnvironment {
+    param([string[]]$Values)
+    $variables = @{}
+    foreach ($value in $Values) {
+        $separator = $value.IndexOf('=')
+        if ($separator -lt 1) { throw 'The service Environment registry value contains an invalid assignment.' }
+        $name = $value.Substring(0, $separator)
+        $variables[$name] = $value.Substring($separator + 1)
+    }
+    return $variables
+}
+
+function Set-ServiceConfigurationAcl {
+    param([string]$Path)
+    $acl = Get-Acl -LiteralPath $Path
+    foreach ($oldRule in @($acl.Access)) { $acl.RemoveAccessRuleSpecific($oldRule) }
+    $acl.SetAccessRuleProtection($true, $false)
+    $owner = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    foreach ($sidText in @($owner.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+        $sid = New-Object System.Security.Principal.SecurityIdentifier($sidText)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')
+        $acl.AddAccessRule($rule)
+    }
+    $serviceSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-19')
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($serviceSid, 'Read', 'Allow')))
+    # Persist only modified access rules; Set-Acl can request SACL privileges
+    # even though changing this file's DACL needs only its owner's WRITE_DAC.
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::SetAccessControl((New-Object IO.FileInfo($Path)), $acl)
+    } else {
+        [IO.File]::SetAccessControl($Path, $acl)
+    }
+}
+
 function Set-PrivateDirectoryAcl {
     param([string]$Path, [System.Security.AccessControl.FileSystemRights]$ServiceRights)
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($entry in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-19', $ServiceRights))) {
+        if ($entry[0] -eq 'S-1-5-19' -and [int]$ServiceRights -eq 0) { continue }
         $sid = New-Object System.Security.Principal.SecurityIdentifier($entry[0])
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, $entry[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow')
         $acl.AddAccessRule($rule)
@@ -97,6 +132,14 @@ $logsDir = Join-Path $DataDir 'logs'
 $workRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $work = Join-Path $workRoot ('tokenresetsmonitor-install-' + [Guid]::NewGuid().ToString('N'))
 $backup = $null
+$serviceEnvironment = @{}
+$serviceRegistry = 'HKLM:\SYSTEM\CurrentControlSet\Services\TokenResetsMonitor'
+if (Test-Path -LiteralPath $serviceRegistry) {
+    $environmentProperty = Get-ItemProperty -LiteralPath $serviceRegistry -Name Environment -ErrorAction SilentlyContinue
+    if ($null -ne $environmentProperty) {
+        $serviceEnvironment = ConvertFrom-ServiceEnvironment @($environmentProperty.Environment)
+    }
+}
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
     $asset = "tokenresetsmonitor_${Version}_windows_amd64.zip"
@@ -113,7 +156,7 @@ try {
     Expand-Archive -LiteralPath $archive -DestinationPath $extract
     $candidate = Join-Path $extract 'tokenresetsmonitor.exe'
     Invoke-Monitor $candidate @('version')
-    if (Test-Path -LiteralPath $config) { Invoke-Monitor $candidate @('config', 'validate', '--config', $config) }
+    if (Test-Path -LiteralPath $config) { Invoke-WithTemporaryEnvironment $serviceEnvironment { Invoke-Monitor $candidate @('config', 'validate', '--structural', '--config', $config) } }
 
     $service = Get-Service -Name TokenResetsMonitor -ErrorAction SilentlyContinue
     if ($null -ne $service) {
@@ -146,6 +189,7 @@ try {
     if ((Test-Path -LiteralPath $executable) -or (Test-Path -LiteralPath $config)) {
         $backup = Join-Path $DataDir ('backups\' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
         New-Item -ItemType Directory -Path $backup -Force | Out-Null
+        Set-PrivateDirectoryAcl $backup ([System.Security.AccessControl.FileSystemRights]0)
         if (Test-Path -LiteralPath $executable) { Copy-Item -LiteralPath $executable -Destination $backup }
         if (Test-Path -LiteralPath $config) { Copy-Item -LiteralPath $config -Destination $backup }
         Copy-Item -LiteralPath $stateDir -Destination (Join-Path $backup 'data') -Recurse
@@ -163,15 +207,17 @@ try {
             Invoke-Monitor $executable @('init', '--defaults', '--config', $config)
         }
     }
-    Invoke-Monitor $executable @('config', 'validate', '--config', $config)
+    # init creates a protected owner-only file; explicitly grant the managed service read access.
+    Set-ServiceConfigurationAcl $config
+    Invoke-WithTemporaryEnvironment $serviceEnvironment { Invoke-Monitor $executable @('config', 'validate', '--structural', '--config', $config) }
     if ($null -eq $service) { Invoke-Monitor $executable @('service', 'install', '--config', $config) }
     if (-not $NoStart) {
         Invoke-Monitor $executable @('service', 'start')
         Start-Sleep -Seconds 2
         if ((Get-Service -Name TokenResetsMonitor).Status -ne 'Running') { throw 'Service failed to start; inspect Windows Event Viewer and application logs.' }
     }
-    Write-Host "Installed $Version. Configure $config and restart the service to apply changes."
-    Write-Host 'Both notification channels are disabled in a new default configuration.'
+    Write-Host "Installed $Version. Configure $config; operational YAML settings reload automatically. Restart for infrastructure or service environment changes."
+    Write-Host 'Notification channels are disabled in a new default configuration.'
 } catch {
     if ($null -ne $backup) { Write-Warning "Installation failed. Backup retained at $backup. Check service state before restoring." }
     throw

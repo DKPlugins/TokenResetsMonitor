@@ -36,6 +36,15 @@ try {
         [Environment]::SetEnvironmentVariable($key, $settings[$key], 'Process')
     }
     Invoke-TestMonitor @('init', '--defaults', '--config', $config)
+    # Exercise the installer's production file ACL; private init files do not inherit directory grants.
+    $installerTokens = $null
+    $installerErrors = $null
+    $installerAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'install.ps1'), [ref]$installerTokens, [ref]$installerErrors)
+    if ($installerErrors.Count -gt 0) { throw 'Installer has parsing errors.' }
+    $aclHelper = $installerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-ServiceConfigurationAcl' }, $false)
+    if ($null -eq $aclHelper) { throw 'Production service configuration ACL helper is missing.' }
+    . ([scriptblock]::Create($aclHelper.Extent.Text))
+    Set-ServiceConfigurationAcl $config
     Invoke-TestMonitor @('service', 'install', '--config', $config)
     $installed = $true
     $service = Get-CimInstance Win32_Service -Filter "Name='TokenResetsMonitor'"

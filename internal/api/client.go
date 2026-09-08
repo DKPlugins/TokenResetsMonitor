@@ -19,6 +19,7 @@ import (
 )
 
 const maxResponseBytes = 8 << 20
+const maxScanBytes = 64 << 20
 const maxPages = 1000
 
 var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,255}$`)
@@ -56,10 +57,11 @@ func New(baseURL string, timeout time.Duration, cache Cache) *Client {
 }
 
 type envelope struct {
-	Data       json.RawMessage `json:"data"`
-	Pagination *struct {
+	responseBytes int
+	Data          json.RawMessage `json:"data"`
+	Pagination    *struct {
 		NextCursor *string `json:"next_cursor"`
-		HasMore    bool    `json:"has_more"`
+		HasMore    *bool   `json:"has_more"`
 	} `json:"pagination"`
 	Meta struct {
 		SchemaVersion string `json:"schema_version"`
@@ -77,6 +79,7 @@ func decodeEnvelope(body []byte) (envelope, error) {
 	if len(e.Data) == 0 || string(e.Data) == "null" {
 		return e, errors.New("API response is missing data")
 	}
+	e.responseBytes = len(body)
 	return e, nil
 }
 
@@ -114,8 +117,11 @@ func (c *Client) get(ctx context.Context, path string) (envelope, error) {
 		}
 		if res.StatusCode == http.StatusNotModified {
 			res.Body.Close()
-			if len(cached.Body) != 0 && attempt == 0 {
+			if len(cached.Body) != 0 && len(cached.Body) <= maxResponseBytes && attempt == 0 {
 				if e, err := decodeEnvelope(cached.Body); err == nil {
+					if err := chargeScan(ctx, len(cached.Body)); err != nil {
+						return empty, err
+					}
 					return e, nil
 				}
 			}
@@ -133,6 +139,9 @@ func (c *Client) get(ctx context.Context, path string) (envelope, error) {
 		}
 		if len(body) > maxResponseBytes {
 			return empty, errors.New("API response exceeds size limit")
+		}
+		if err := chargeScan(ctx, len(body)); err != nil {
+			return empty, err
 		}
 		e, err := decodeEnvelope(body)
 		if err != nil {
@@ -240,6 +249,7 @@ func (c *Client) Events(ctx context.Context, slug string) ([]model.Event, error)
 	seenCursor := make(map[string]bool)
 	seenEvents := make(map[string]bool)
 	cursor := ""
+	totalBytes := 0
 	for page := 0; page < maxPages; page++ {
 		query := url.Values{"limit": {"100"}}
 		if cursor != "" {
@@ -249,7 +259,11 @@ func (c *Client) Events(ctx context.Context, slug string) ([]model.Event, error)
 		if err != nil {
 			return nil, err
 		}
-		if e.Pagination == nil {
+		totalBytes += e.responseBytes
+		if totalBytes > maxScanBytes {
+			return nil, errors.New("API history exceeds total scan size limit")
+		}
+		if e.Pagination == nil || e.Pagination.HasMore == nil {
 			return nil, errors.New("API event response is missing pagination")
 		}
 		var batch []model.Event
@@ -272,7 +286,7 @@ func (c *Client) Events(ctx context.Context, slug string) ([]model.Event, error)
 			seenEvents[batch[i].ID] = true
 			events = append(events, batch[i])
 		}
-		if !e.Pagination.HasMore {
+		if !*e.Pagination.HasMore {
 			return events, nil
 		}
 		if len(batch) == 0 || e.Pagination.NextCursor == nil || *e.Pagination.NextCursor == "" {

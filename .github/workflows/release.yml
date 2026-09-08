@@ -36,20 +36,31 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo 'A release already exists for this tag; publish a new version.' >&2
-            exit 1
-          fi
+          status=$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output "$RUNNER_TEMP/trm-existing-release.json" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG")
+          case "$status" in
+            200) echo 'A release already exists for this tag; publish a new version.' >&2; exit 1 ;;
+            404) ;;
+            *) echo 'Cannot verify release tag absence; refusing to publish.' >&2; exit 1 ;;
+          esac
           # Authenticate once to resolve private or public GHCR tags consistently.
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          if docker manifest inspect "ghcr.io/dkplugins/tokenresetsmonitor:$RELEASE_TAG" >/dev/null 2>&1; then
+          if docker manifest inspect "ghcr.io/dkplugins/tokenresetsmonitor:$RELEASE_TAG" >"$RUNNER_TEMP/trm-manifest.json" 2>"$RUNNER_TEMP/trm-manifest.error"; then
             echo 'A container tag already exists; publish a new version.' >&2
+            exit 1
+          elif ! grep -Eiq '(no such manifest|manifest unknown)' "$RUNNER_TEMP/trm-manifest.error"; then
+            echo 'Cannot verify container tag absence; refusing to publish.' >&2
             exit 1
           fi
       - name: Build release archives
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: sh scripts/release.sh "$RELEASE_TAG"
+        run: |
+          sh scripts/release.sh "$RELEASE_TAG"
+          python3 scripts/verify-release.py "dist/$RELEASE_TAG"
       - name: Prepare image metadata
         id: metadata
         env:
@@ -83,7 +94,7 @@ jobs:
           case "$RELEASE_TAG" in *-*) set -- --prerelease ;; esac
           gh release create "$RELEASE_TAG" \
             "dist/$RELEASE_TAG/"*.tar.gz "dist/$RELEASE_TAG/"*.zip \
-            "dist/$RELEASE_TAG/checksums.txt" "dist/$RELEASE_TAG/install.sh" "dist/$RELEASE_TAG/install.ps1" \
+            "dist/$RELEASE_TAG/compatibility.json" "dist/$RELEASE_TAG/checksums.txt" "dist/$RELEASE_TAG/install.sh" "dist/$RELEASE_TAG/install.ps1" \
             --draft --verify-tag --title "TokenResetsMonitor $RELEASE_TAG" --generate-notes "$@"
           # Attach every artifact before publication makes this release immutable.
           gh release edit "$RELEASE_TAG" --draft=false

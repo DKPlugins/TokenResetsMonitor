@@ -37,6 +37,9 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Build
         run: go build ./cmd/tokenresetsmonitor
+      - name: Linux installer environment regression
+        if: runner.os == 'Linux'
+        run: sh scripts/test-installer-environment.sh "$PWD/tokenresetsmonitor"
       - name: Parse Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -58,8 +61,8 @@ jobs:
       - name: Shell and systemd checks
         if: runner.os == 'Linux'
         run: |
-          sh -n scripts/install.sh scripts/release.sh scripts/smoke-systemd.sh
-          shellcheck scripts/install.sh scripts/release.sh scripts/smoke-systemd.sh
+          sh -n scripts/install.sh scripts/release.sh scripts/smoke-systemd.sh scripts/test-installer-environment.sh
+          shellcheck scripts/install.sh scripts/release.sh scripts/smoke-systemd.sh scripts/test-installer-environment.sh
           sudo env CI=true sh scripts/smoke-systemd.sh
 
   docker:
@@ -70,8 +73,14 @@ jobs:
           persist-credentials: false
       - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Validate monitoring examples and alert behavior
+        run: |
+          docker pull prom/prometheus:v3.14.0
+          docker run --rm --network none --mount "type=bind,src=$PWD/docs/examples,dst=/examples,readonly" --workdir /examples --entrypoint promtool prom/prometheus:v3.14.0 check config prometheus.yml
+          docker run --rm --network none --mount "type=bind,src=$PWD/docs/examples,dst=/examples,readonly" --workdir /examples --entrypoint promtool prom/prometheus:v3.14.0 test rules alerts.test.yml
       - name: Build and run each architecture
         run: |
+          docker pull node:24-alpine
           for arch in amd64 arm64; do
             docker buildx build --platform "linux/$arch" --load -t "trm-test:$arch" .
             docker run --rm --platform "linux/$arch" "trm-test:$arch" version
@@ -95,6 +104,7 @@ jobs:
             jq -e '.running == false and .pending == 0 and (.providers | length == 2) and ([.providers[].ready] | all(. == false))' status.json
             docker run --rm --platform "linux/$arch" --read-only --mount "type=volume,src=$volume,dst=/data" \
               --entrypoint sh "trm-test:$arch" -c 'test "$(id -u)" = 10001 && test -s /data/state.db && test "$(stat -c %u /data/state.db)" = 10001'
+            python3 scripts/test-container.py --image "trm-test:$arch" --platform "linux/$arch"
             docker volume rm "$volume"
             trap - EXIT
           done

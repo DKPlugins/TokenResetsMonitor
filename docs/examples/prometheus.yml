@@ -1,0 +1,13 @@
+# Run Prometheus on the monitor's Compose network.
+# For a native daemon on this host, change monitor:9090 to 127.0.0.1:9090.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: tokenresetsmonitor
+    static_configs:
+      - targets: ["monitor:9090"]

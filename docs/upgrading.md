@@ -1,8 +1,24 @@
 # Upgrading and rolling back
 
-Install exact versions. Read the release notes before updating, including schema changes and the minimum Go version if you build from source. The process never downloads or installs updates on its own.
+Install exact versions. Read the release notes before updating, including schema changes and the minimum Go version if you build from source. The process checks release metadata when enabled but never downloads or installs executable updates.
 
-Application SemVer and the three schema versions are separate. A compatible application update preserves the meaning of existing configuration and delivery IDs. `config_version`, `state_schema_version`, and webhook `schema_version` are currently `1`.
+Application SemVer and the three schema versions are separate. A compatible application update preserves the meaning of existing configuration and delivery IDs. For 1.1, configuration and state schemas are `2`; webhook `schema_version` remains `1`. Version 1 configuration files remain readable and are normalized in memory.
+
+## Check before installing
+
+```sh
+tokenresetsmonitor check-update --json
+tokenresetsmonitor doctor --config ./config.yaml
+tokenresetsmonitor doctor --offline --config ./config.yaml
+```
+
+`check-update` reads GitHub Releases over HTTPS with time/body limits and conditional requests. Stable releases are selected by default; `updates.include_prerelease: true` includes candidates from the most recent 100 release records. It compares SemVer correctly, including numeric prerelease components, and returns the release page, availability, and declared compatibility. An available release still returns exit 0; a network/protocol error returns 1 and a diagnostic message.
+
+Background checks run every 24 hours unless `updates.enabled: false`. Rate limits defer retries. No GitHub token is required for public release metadata. Missing/malformed metadata or a failed check does not mean the installation is current.
+
+New releases publish `compatibility.json` containing `manifest_version`, application version, supported configuration/state schema ranges, webhook/API schemas, and native platforms. The declared result is `supported`, `incompatible`, or `unknown`; older releases without a manifest are unknown. This compares the release to the running binary's contracts. It is not proof that a particular filesystem, custom template, or service environment works.
+
+Doctor checks configuration and platform, reads a current running status snapshot for state compatibility, and makes read-only source catalog/provider/event requests to validate API schema and complete pagination. Its total API deadline is 30 seconds. It never opens/migrates the live database or sends notifications. Offline mode makes no network requests. Missing/stale daemon metadata is unverified rather than guessed. Directory inspection checks existence/accessibility, not effective write permission under another service account.
 
 ## Before an update
 
@@ -48,7 +64,13 @@ tokenresetsmonitor config migrate --apply --config ./config.yaml
 tokenresetsmonitor config validate --config ./config.yaml
 ```
 
-The first command previews the transition; `--apply` writes it and retains the original in a sibling `config.yaml.backup-<timestamp>`. Files already at the current version are left unchanged. Unknown future configuration versions are refused.
+The first command previews the transition; `--apply` writes it and retains the original in a sibling `config.yaml.backup-<timestamp>`. Files already at the current version are left unchanged. Version 1 files remain readable by 1.1 without rewriting. New 1.1 settings require the 1.1 binary; a 1.0 validator accepts neither these fields nor schema 2. Keep the original version-1 configuration for rollback. Unknown future configuration versions are refused.
+
+## Moving from 1.0 to 1.1
+
+The first 1.1 daemon startup migrates supported state to schema 2 and retains a sibling pre-migration backup. Existing notification IDs, acknowledgements, and pending work are preserved. The added channel cooldown survives restarts.
+
+A 1.0 binary cannot read schema 2. Keep a stopped schema-1 backup and matching version-1 configuration for rollback; merely replacing the executable is insufficient. A rollback to an older backup may resend deliveries acknowledged after that backup, which is why receivers should deduplicate notification IDs.
 
 ## Rollback
 
@@ -57,3 +79,5 @@ Stop the current process. Preserve its database separately before restoring anyt
 Restore the entire state directory from a stopped backup, keeping the original ownership and access permissions. On Windows, use native PowerShell file operations and retain LocalService access to data/logs. On Linux, state/log directories must remain writable by the `tokenresetsmonitor` user. Start the old version and inspect status/logs before resuming routine operation.
 
 Restoring older state also restores its knowledge of acknowledgments. Notifications delivered after that backup may be attempted again. Webhook receivers should deduplicate persistent `Idempotency-Key` values; Telegram duplicates may need to be recognized by event and time. Rollback can also omit work created after the backup, so preserve the failed-update data until reconciliation is complete.
+
+A target release must publish the exact archive for the current OS/architecture; a platform declaration alone is insufficient. If its schema ranges drop a legacy format still accepted by this binary, compatibility remains unknown until the installation is inspected/migrated. The checker reads release metadata and compatibility.json only; it never downloads the executable archives.

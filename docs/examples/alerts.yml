@@ -1,0 +1,67 @@
+# The stale-source and backlog thresholds assume the default 30m poll interval.
+# Tune these for your source cadence, retry policy, and operational expectations.
+groups:
+  - name: tokenresetsmonitor
+    rules:
+      - alert: TokenResetsMonitorDown
+        expr: up{job="tokenresetsmonitor"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: TokenResetsMonitor metrics are unreachable
+          description: Check the daemon, monitoring network, and configured scrape target.
+
+      - alert: TokenResetsMonitorProviderNotReady
+        expr: tokenresetsmonitor_provider_ready == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: A TokenResets provider is not ready
+          description: Check source availability and the first complete provider baseline.
+
+      - alert: TokenResetsMonitorSourceStale
+        expr: (time() - tokenresetsmonitor_provider_last_success_timestamp_seconds > 7200) and (tokenresetsmonitor_provider_last_success_timestamp_seconds > 0)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A TokenResets provider has no recent successful scan
+          description: The last complete scan is more than two hours old; inspect API failures and source cooldowns.
+
+      - alert: TokenResetsMonitorFailedDelivery
+        expr: tokenresetsmonitor_deliveries{status="failed"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: TokenResetsMonitor has permanently failed deliveries
+          description: Correct the destination and review eligible failed deliveries before explicitly retrying.
+
+      - alert: TokenResetsMonitorDeliveryBacklog
+        expr: tokenresetsmonitor_oldest_pending_age_seconds > 3600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: A TokenResetsMonitor notification has waited more than one hour
+          description: Check recipient availability and rate-limit cooldowns.
+
+      - alert: TokenResetsMonitorReloadRejected
+        expr: tokenresetsmonitor_config_last_reload_successful == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: TokenResetsMonitor rejected a configuration reload
+          description: The previous settings remain active; inspect the reload reason and correct the file.
+
+      - alert: TokenResetsMonitorUpdateCheckFailed
+        expr: (tokenresetsmonitor_update_check_success == 0) and (tokenresetsmonitor_update_last_check_timestamp_seconds > 0)
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: TokenResetsMonitor could not check project releases
+          description: Update availability is unconfirmed; inspect network access or GitHub rate limits.

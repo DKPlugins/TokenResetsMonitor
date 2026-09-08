@@ -22,9 +22,22 @@ getent passwd tokenresetsmonitor >/dev/null || useradd --system --user-group --n
 install -d -m 750 -o root -g tokenresetsmonitor /etc/tokenresetsmonitor
 install -d -m 700 -o tokenresetsmonitor -g tokenresetsmonitor /var/lib/tokenresetsmonitor /var/log/tokenresetsmonitor
 install -m 755 tokenresetsmonitor /usr/local/bin/tokenresetsmonitor
-TRM_STATE_PATH=/var/lib/tokenresetsmonitor/state.db TRM_API_BASE_URL=http://127.0.0.1:1/api/v1 \
+TRM_TELEGRAM_BOT_TOKEN=fixture-service-token TRM_UPDATES_ENABLED=false \
+    TRM_STATE_PATH=/var/lib/tokenresetsmonitor/state.db TRM_API_BASE_URL=http://127.0.0.1:1/api/v1 \
     TRM_LOGGING_FORMAT=json TRM_LOGGING_FILE_ENABLED=true TRM_LOGGING_DIRECTORY=/var/log/tokenresetsmonitor \
     /usr/local/bin/tokenresetsmonitor init --defaults --config /etc/tokenresetsmonitor/config.yaml
+printf '%s\n' 'TRM_TELEGRAM_BOT_TOKEN=fixture-service-token' 'TRM_UPDATES_ENABLED=false' > /etc/tokenresetsmonitor/environment
+chmod 600 /etc/tokenresetsmonitor/environment
+# Load only the production validation function; never execute the installer.
+validation_helper=/etc/tokenresetsmonitor/validate-helper.sh
+sed -n '/^validate_configuration() {/,/^}/p' scripts/install.sh > "$validation_helper"
+CONFIG=/etc/tokenresetsmonitor/config.yaml
+# shellcheck disable=SC1090
+. "$validation_helper"
+if /usr/local/bin/tokenresetsmonitor config validate --config "$CONFIG" >/dev/null 2>&1; then
+    echo 'Fixture should require the service environment.' >&2; exit 1
+fi
+validate_configuration /usr/local/bin/tokenresetsmonitor
 chown root:tokenresetsmonitor /etc/tokenresetsmonitor/config.yaml
 chmod 640 /etc/tokenresetsmonitor/config.yaml
 install -m 644 packaging/systemd/tokenresetsmonitor.service /etc/systemd/system/tokenresetsmonitor.service

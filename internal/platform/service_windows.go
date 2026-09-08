@@ -178,6 +178,9 @@ func install(manager *mgr.Mgr, configPath, executablePath string) error {
 	if info, err := os.Stat(configPath); err != nil || info.IsDir() {
 		return errors.New("configuration file must exist before installing the service")
 	}
+	if err := checkServiceConfigurationAccess(configPath); err != nil {
+		return err
+	}
 	if executablePath == "" {
 		executablePath, err = os.Executable()
 		if err != nil {

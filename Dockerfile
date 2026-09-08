@@ -3,7 +3,7 @@ ARG GO_VERSION=1.26
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=1.0.0-rc.1
+ARG VERSION=1.1.0-rc.1
 ARG COMMIT=development
 ARG BUILD_DATE=unknown
 WORKDIR /src
@@ -27,5 +27,7 @@ ENV TRM_STATE_PATH=/data/state.db \
     TRM_LOGGING_FORMAT=json \
     TRM_LOGGING_FILE_ENABLED=false
 VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["/usr/local/bin/tokenresetsmonitor", "healthcheck", "--state-path", "/data/state.db"]
 ENTRYPOINT ["/usr/local/bin/tokenresetsmonitor"]
 CMD ["run", "--config", "/config/config.yaml"]

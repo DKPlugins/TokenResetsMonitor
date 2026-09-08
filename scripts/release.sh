@@ -15,6 +15,10 @@ FLAGS="-s -w -X $MODULE.Version=${VERSION#v} -X $MODULE.Commit=$COMMIT -X $MODUL
 OUTPUT="$ROOT/dist/$VERSION"
 [ ! -e "$OUTPUT" ] || { echo "Output already exists: $OUTPUT; use a new version or remove an unpublished local build explicitly." >&2; exit 1; }
 mkdir -p "$OUTPUT"
+# Each release installer defaults to its own immutable release.
+sed -E "s/^(VERSION=)v[0-9][0-9A-Za-z.-]*/\1$VERSION/" scripts/install.sh > "$OUTPUT/install.sh"
+sed -E "s/(Version = ')v[0-9][0-9A-Za-z.-]*(',)/\1$VERSION\2/" scripts/install.ps1 > "$OUTPUT/install.ps1"
+go run -ldflags "$FLAGS" ./cmd/tokenresetsmonitor compatibility-manifest > "$OUTPUT/compatibility.json"
 
 for TARGET in linux_amd64 linux_arm64 windows_amd64; do
     OS=${TARGET%_*}
@@ -24,17 +28,17 @@ for TARGET in linux_amd64 linux_arm64 windows_amd64; do
     BINARY=tokenresetsmonitor
     [ "$OS" != windows ] || BINARY=tokenresetsmonitor.exe
     CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -ldflags "$FLAGS" -o "$WORK/$BINARY" ./cmd/tokenresetsmonitor
-    cp LICENSE README.md config.example.yaml "$WORK/"
-    cp scripts/install.sh scripts/install.ps1 "$WORK/"
+    cp LICENSE README.md CHANGELOG.md CONTRIBUTING.md config.example.yaml compose.yaml "$WORK/"
+    cp -R docs "$WORK/docs"
+    cp "$OUTPUT/install.sh" "$OUTPUT/install.ps1" "$OUTPUT/compatibility.json" "$WORK/"
     cp packaging/systemd/tokenresetsmonitor.service "$WORK/"
     ASSET="tokenresetsmonitor_${VERSION}_${TARGET}"
     if [ "$OS" = windows ]; then
-        (cd "$WORK" && zip -q "$OUTPUT/$ASSET.zip" ./*)
+        (cd "$WORK" && zip -qr "$OUTPUT/$ASSET.zip" .)
     else
         chmod 755 "$WORK/tokenresetsmonitor" "$WORK/install.sh"
-        tar -czf "$OUTPUT/$ASSET.tar.gz" -C "$WORK" tokenresetsmonitor LICENSE README.md config.example.yaml install.sh install.ps1 tokenresetsmonitor.service
+        tar -czf "$OUTPUT/$ASSET.tar.gz" -C "$WORK" tokenresetsmonitor LICENSE README.md CHANGELOG.md CONTRIBUTING.md config.example.yaml compose.yaml docs compatibility.json install.sh install.ps1 tokenresetsmonitor.service
     fi
 done
-cp scripts/install.sh scripts/install.ps1 "$OUTPUT/"
-(cd "$OUTPUT" && sha256sum ./*.tar.gz ./*.zip ./install.sh ./install.ps1 | sed 's|  \./|  |' > checksums.txt)
+(cd "$OUTPUT" && sha256sum ./*.tar.gz ./*.zip ./install.sh ./install.ps1 ./compatibility.json | sed 's|  \./|  |' > checksums.txt)
 echo "Release files: $OUTPUT"

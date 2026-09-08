@@ -3,7 +3,7 @@
 set -eu
 umask 077
 
-VERSION=v1.0.0
+VERSION=v1.1.0-rc.1
 START=1
 SYSTEMD=1
 REPOSITORY=DKPlugins/TokenResetsMonitor
@@ -13,11 +13,11 @@ DATA=/var/lib/tokenresetsmonitor
 LOGS=/var/log/tokenresetsmonitor
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 Usage: sudo sh install.sh [--version vX.Y.Z[-prerelease]] [--no-start] [--foreground]
 
 Installs a checksum-verified release for Linux amd64/arm64. Defaults to
-v1.0.0. Existing configuration and state are preserved. --foreground
+$VERSION. Existing configuration and state are preserved. --foreground
 skips systemd registration; --no-start leaves the installed service stopped.
 EOF
 }
@@ -32,7 +32,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 printf '%s\n' "$VERSION" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
-    echo 'Version must be a release tag such as v1.0.0.' >&2; exit 2;
+    echo 'Version must be a release tag such as v1.1.0-rc.1.' >&2; exit 2;
 }
 [ "$(uname -s)" = Linux ] || { echo 'This installer supports Linux only.' >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo 'Run this installer with sudo or as root.' >&2; exit 2; }
@@ -66,6 +66,23 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
 
+# Validate with systemd's own EnvironmentFile parser when the service uses it.
+# Never source this file as shell code or copy its secret values into arguments.
+validate_configuration() {
+    candidate=$1
+    if [ -f /etc/tokenresetsmonitor/environment ] && [ -d /run/systemd/system ]; then
+        command -v systemd-run >/dev/null 2>&1 || {
+            echo 'systemd-run is required to validate the service environment.' >&2; return 1;
+        }
+        systemd-run --quiet --wait --pipe --collect \
+            --property=Type=exec \
+            --property=EnvironmentFile=/etc/tokenresetsmonitor/environment \
+            "$candidate" config validate --structural --config "$CONFIG"
+    else
+        "$candidate" config validate --structural --config "$CONFIG"
+    fi
+}
+
 ASSET="tokenresetsmonitor_${VERSION}_linux_${ARCH}.tar.gz"
 BASE="https://github.com/$REPOSITORY/releases/download/$VERSION"
 curl --fail --location --silent --show-error --retry 3 --connect-timeout 10 --max-time 180 "$BASE/$ASSET" -o "$WORK/$ASSET"
@@ -79,7 +96,7 @@ tar -xzf "$WORK/$ASSET" -C "$WORK/extracted" tokenresetsmonitor tokenresetsmonit
 chmod 755 "$WORK/extracted/tokenresetsmonitor"
 "$WORK/extracted/tokenresetsmonitor" version
 if [ -f "$CONFIG" ]; then
-    "$WORK/extracted/tokenresetsmonitor" config validate --config "$CONFIG"
+    validate_configuration "$WORK/extracted/tokenresetsmonitor"
 fi
 
 if ! getent passwd tokenresetsmonitor >/dev/null; then
@@ -115,7 +132,7 @@ if [ ! -f "$CONFIG" ]; then
 fi
 chown root:tokenresetsmonitor "$CONFIG"
 chmod 640 "$CONFIG"
-"$BIN" config validate --config "$CONFIG"
+validate_configuration "$BIN"
 if [ "$SYSTEMD" -eq 1 ]; then
     install -m 644 "$WORK/extracted/tokenresetsmonitor.service" /etc/systemd/system/tokenresetsmonitor.service
     systemctl daemon-reload
@@ -126,6 +143,6 @@ if [ "$SYSTEMD" -eq 1 ]; then
         systemctl is-active --quiet tokenresetsmonitor.service || { echo 'Service failed to start; inspect journalctl -u tokenresetsmonitor.' >&2; exit 1; }
     fi
 fi
-echo "Installed $VERSION. Configure $CONFIG and restart the monitor to apply changes."
-echo 'Both notification channels are disabled in a new default configuration.'
+echo "Installed $VERSION. Configure $CONFIG; operational YAML settings reload automatically. Restart for infrastructure or service environment changes."
+echo 'Notification channels are disabled in a new default configuration.'
 echo 'Use test-notification to verify a configured channel before enabling it.'

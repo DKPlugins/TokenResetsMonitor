@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +30,7 @@ func initialize(ctx context.Context, opts options, overrides map[string]string, 
 	}{
 		{"TRM_WEBHOOK_URL", &cfg.Webhook.URL}, {"TRM_WEBHOOK_BODY_TEMPLATE", &cfg.Webhook.BodyTemplate},
 		{"TRM_TELEGRAM_BOT_TOKEN", &cfg.Telegram.BotToken}, {"TRM_TELEGRAM_CHAT_ID", &cfg.Telegram.ChatID},
+		{"TRM_SLACK_WEBHOOK_URL", &cfg.Slack.WebhookURL},
 	}
 	for _, ref := range credentialRefs {
 		if _, ok := os.LookupEnv(ref.name); ok {
@@ -55,23 +55,8 @@ func initialize(ctx context.Context, opts options, overrides map[string]string, 
 		fmt.Fprintln(out, "Environment credentials remain references or runtime overrides; make them available to the service account.")
 		return nil
 	}
-	reader := bufio.NewReader(in)
-	ask := func(question, defaultValue string) (string, error) {
-		if defaultValue != "" {
-			fmt.Fprintf(out, "%s [%s]: ", question, defaultValue)
-		} else {
-			fmt.Fprintf(out, "%s: ", question)
-		}
-		value, e := reader.ReadString('\n')
-		if e != nil && !(e == io.EOF && value != "") {
-			return "", errors.New("wizard input ended; no configuration was written (use --defaults for unattended setup)")
-		}
-		value = strings.TrimSpace(value)
-		if value == "" {
-			value = defaultValue
-		}
-		return value, nil
-	}
+	prompt := newSetupPrompter(in, out)
+	ask := prompt.ask
 	fmt.Fprintln(out, "TokenResetsMonitor setup. This monitors public announcements, not your personal account limits.")
 	client := api.New(cfg.APIBaseURL, cfg.HTTPTimeout(), nil)
 	catalog, e := client.Catalog(ctx)
@@ -141,13 +126,13 @@ func initialize(ctx context.Context, opts options, overrides map[string]string, 
 	cfg.Webhook.Enabled = isYes(value)
 	if cfg.Webhook.Enabled {
 		fmt.Fprintln(out, "Use ${ENV_NAME} references for secret URLs or authorization values; they remain references in the file.")
-		if cfg.Webhook.URL, e = ask("Webhook URL", ""); e != nil {
+		if cfg.Webhook.URL, e = prompt.secret("Webhook URL or environment reference", cfg.Webhook.URL); e != nil {
 			return e
 		}
 		if cfg.Webhook.Method, e = ask("HTTP method", cfg.Webhook.Method); e != nil {
 			return e
 		}
-		if value, e = ask("Authorization header (blank = none)", ""); e != nil {
+		if value, e = prompt.secret("Authorization header (blank = none)", ""); e != nil {
 			return e
 		}
 		if value != "" {
@@ -165,14 +150,20 @@ func initialize(ctx context.Context, opts options, overrides map[string]string, 
 	}
 	cfg.Telegram.Enabled = isYes(value)
 	if cfg.Telegram.Enabled {
-		fmt.Fprintln(out, "Prefer ${TELEGRAM_BOT_TOKEN} to keep the token outside the configuration.")
-		if cfg.Telegram.BotToken, e = ask("Bot token or environment reference", ""); e != nil {
-			return e
-		}
-		if cfg.Telegram.ChatID, e = ask("Chat ID", ""); e != nil {
+		if e = configureTelegram(ctx, prompt, &cfg.Telegram); e != nil {
 			return e
 		}
 	}
+	if value, e = ask("Enable Slack? (yes/no)", "no"); e != nil {
+		return e
+	}
+	cfg.Slack.Enabled = isYes(value)
+	if cfg.Slack.Enabled {
+		if e = configureSlack(ctx, prompt, &cfg.Slack); e != nil {
+			return e
+		}
+	}
+
 	if value, e = ask("Enable rotating file logs? (yes/no)", "no"); e != nil {
 		return e
 	}

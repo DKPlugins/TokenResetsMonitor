@@ -1,6 +1,6 @@
 # Architecture and compatibility contracts
 
-TokenResetsMonitor is an outbound-only process. It has no web UI, inbound server, personal-account access, or automatic updater.
+TokenResetsMonitor reads public announcements and sends notifications. It has no web UI or personal-account access. An optional local HTTP server exposes operational metrics and health; project release checks never install updates.
 
 ```mermaid
 flowchart LR
@@ -9,6 +9,8 @@ flowchart LR
     State --> Filters[Provider and event filters]
     Filters --> Webhook[Webhook delivery]
     Filters --> Telegram[Telegram delivery]
+    Filters --> Slack[Slack delivery]
+    State --> Health[Cached metrics and health]
     Scan --> Logs[Redacted structured logs]
     Webhook --> Logs
     Telegram --> Logs
@@ -17,7 +19,7 @@ flowchart LR
     Logs --> Export
 ```
 
-The implementation is divided into `internal/api`, `filter`, `model`, `config`, `state`, `monitor`, `notify`, `logging`, `platform`, and `cli`. New channels should implement rendering and one-attempt dispatch through the notification adapter while retaining the monitor's durable scheduling and cancellation rules.
+The implementation is divided into `internal/api`, `filter`, `model`, `config`, `state`, `monitor`, `notify`, `logging`, `platform`, `observability`, `updates`, and `cli`. New channels should implement rendering and one-attempt dispatch through the notification adapter while retaining the monitor's durable scheduling and cancellation rules.
 
 ## State and detection
 
@@ -25,11 +27,11 @@ The selected provider endpoints are scanned to completion. Each request URL has 
 
 The state database contains versioned metadata, provider initialization state, event snapshots/revisions, HTTP cache entries, and per-channel deliveries. A transaction records observed events and new queue items together. Baselines are committed only after a full successful provider scan. Events from that baseline remain suppressed; configuration edits do not turn the initial history into a backlog.
 
-Pending deliveries are reconciled against current recipients and filters at startup. Credentials do not define recipient identity. Source revisions can change eligibility for a post-baseline event, but an already acknowledged notification is not resent as a second reset. List disappearance is insufficient evidence of withdrawal.
+Pending deliveries are reconciled against current recipients and filters at startup and at accepted operational reloads. Credentials do not define recipient identity. Source revisions can change eligibility for a post-baseline event, but an already acknowledged notification is not resent as a second reset. List disappearance is insufficient evidence of withdrawal.
 
 Opening a database takes an exclusive process lock with a bounded timeout. Status and diagnostic commands read a separately published JSON snapshot, avoiding the database's write lock. Store the database on a local disk and mount the same persistent volume across container replacements.
 
-The queue provides at-least-once delivery around crashes, not exactly-once delivery at the recipient. One failed channel does not block the other. HTTP `2xx` acknowledges a webhook; Telegram additionally requires `ok: true`. Retriable attempts use exponential backoff and honor `Retry-After`. An explicit command requeues eligible permanent failures after the process is stopped.
+The queue provides at-least-once delivery around crashes, not exactly-once delivery at the recipient. One failed channel does not block the other. HTTP `2xx` acknowledges a webhook; Telegram additionally requires `ok: true`, and Slack requires HTTP 200 with an `ok` response. Retriable attempts use exponential backoff and honor `Retry-After`. Rate limits persist a cooldown for the complete destination, preventing a queue burst from bypassing the limit. An explicit command requeues eligible permanent failures after the process is stopped.
 
 ## Webhook contract
 
@@ -49,7 +51,7 @@ Receivers should tolerate additional object fields, persist accepted notificatio
 
 ## Version boundaries
 
-The application uses SemVer, beginning with `1.0.0-rc.1`. Configuration (`config_version`), bbolt metadata (`state_schema_version`), and webhook JSON (`schema_version`) start at `1` and evolve independently. Additive optional webhook fields are compatible within the same schema; changing existing meaning or removing fields requires an explicit incompatible schema transition and an application major release.
+The application uses SemVer. Version 1.1 writes configuration (`config_version`) 2 and bbolt metadata (`state_schema_version`) 2; webhook JSON (`schema_version`) remains 1. Version 1 configurations are normalized in memory; saving a migration is explicit. Supported old databases migrate after a backup. These versions evolve independently. Additive optional webhook fields are compatible within the same schema; changing existing meaning or removing fields requires an explicit incompatible schema transition and an application major release.
 
 Known old database schemas migrate transactionally after a backup. Newer unsupported schemas are refused. Configuration migration is an explicit preview/apply command and preserves the original bytes in a sibling backup. Schema zero represents the early unversioned layout; it is supported for migration testing, not a separate published stable release.
 
@@ -58,3 +60,11 @@ Known old database schemas migrate transactionally after a backup. Newer unsuppo
 The application uses `log/slog`; file logs are JSON irrespective of console format. Sanitization happens before output, and source text, credentials, headers, and HTTP bodies are not emitted as diagnostic objects. The daemon owns the rotating writer; auxiliary commands never append to its files.
 
 Exports accept only structured log records and an allowlist of operational fields, then redact again. The archive contains a manifest with available time coverage and skipped-record counts, logs, and an optional operational snapshot. It does not contain the database, environment, or raw configuration. An export is a local artifact and does not contact a support service.
+
+## Runtime generation and observability
+
+A reload builds and validates the next effective configuration, drains the old workers at request boundaries, reconciles persistent deliveries, then starts the new generation. Invalid input or infrastructure changes retain the previous generation. Listener and logging output identities remain fixed until restart. Startup and reload preserve baseline/no-replay semantics.
+
+The daemon publishes a bounded status snapshot with runtime/schema versions, active configuration generation, provider readiness, channel queue counts/cooldowns, and update-check result. Health commands and doctor read this snapshot without opening bbolt. The HTTP server uses in-memory operational state and does not run source or notification requests during scrapes.
+
+Release compatibility is declared by a versioned `compatibility.json` asset. The checker compares supported schema ranges/platforms; missing metadata stays unknown. SemVer selects whether a release is newer but does not establish schema compatibility by itself. [Operational endpoints](observability.md) and [upgrade checks](upgrading.md) describe the public behavior.

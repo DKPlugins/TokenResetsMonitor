@@ -106,7 +106,7 @@ func Test304WithoutCachedBodyRetriesUnconditionally(t *testing.T) {
 }
 
 func TestIncompleteScanReturnsNoPartialSnapshot(t *testing.T) {
-	for _, name := range []string{"wrong_provider", "zero_revision", "missing_date", "missing_id", "new_schema", "missing_pagination", "repeated_cursor", "second_page_failure"} {
+	for _, name := range []string{"wrong_provider", "zero_revision", "missing_date", "missing_id", "new_schema", "missing_pagination", "missing_has_more", "null_has_more", "wrong_has_more_type", "repeated_cursor", "second_page_failure"} {
 		t.Run(name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				e := fixtureEvent("first")
@@ -138,6 +138,15 @@ func TestIncompleteScanReturnsNoPartialSnapshot(t *testing.T) {
 				}
 				if name == "missing_pagination" {
 					body = `{"data":[],"meta":{"schema_version":"1.0"}}`
+				}
+				if name == "missing_has_more" {
+					body = `{"data":[],"pagination":{"next_cursor":"next"},"meta":{"schema_version":"1.0"}}`
+				}
+				if name == "null_has_more" {
+					body = `{"data":[],"pagination":{"has_more":null},"meta":{"schema_version":"1.0"}}`
+				}
+				if name == "wrong_has_more_type" {
+					body = `{"data":[],"pagination":{"has_more":"false"},"meta":{"schema_version":"1.0"}}`
 				}
 				fmt.Fprint(w, body)
 			}))

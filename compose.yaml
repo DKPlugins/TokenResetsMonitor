@@ -1,6 +1,9 @@
 services:
   monitor:
-    image: ghcr.io/dkplugins/tokenresetsmonitor:${TRM_VERSION:-v1.0.0}
+    # The source checkout builds the current release candidate by default.
+    # Set TRM_VERSION to an exact published tag and use --no-build for releases.
+    image: ghcr.io/dkplugins/tokenresetsmonitor:${TRM_VERSION:-local}
+    build: .
     restart: unless-stopped
     init: true
     read_only: true
@@ -10,11 +13,17 @@ services:
       - ALL
     volumes:
       - monitor-data:/data
-      - ./config.yaml:/config/config.yaml:ro
+      # Mount the directory so atomic editor saves remain visible to hot reload.
+      - ./config:/config:ro
     environment:
       TRM_STATE_PATH: /data/state.db
       TRM_LOGGING_FORMAT: json
       TRM_LOGGING_FILE_ENABLED: "false"
+      TRM_OBSERVABILITY_ENABLED: "true"
+      TRM_OBSERVABILITY_LISTEN: "0.0.0.0:9090"
+    expose:
+      - "9090"
+    # Metrics are reachable inside the Compose network, with no public host port.
     logging:
       driver: json-file
       options:

@@ -17,16 +17,18 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 var ErrLocked = errors.New("state database is in use; stop the monitor before this command")
 
-var buckets = []string{"meta", "providers", "events", "outbox", "cache"}
+var buckets = []string{"meta", "providers", "events", "outbox", "cache", "cooldowns"}
 
 type Store struct {
-	db       *bolt.DB
-	path     string
-	statusMu sync.Mutex
+	db          *bolt.DB
+	path        string
+	statusMu    sync.Mutex
+	runtimeMu   sync.RWMutex
+	runtimeJSON []byte
 }
 
 // Open takes a bounded exclusive lock. An existing database is inspected read-only
@@ -86,8 +88,9 @@ func Open(path string) (*Store, error) {
 				return err
 			}
 		}
-		// Schema zero is the initial, unversioned bucket layout. This migration
-		// preserves its records and creates any buckets absent in early builds.
+		// Schema zero is the initial, unversioned bucket layout. Schema two adds
+		// recipient cooldowns without changing event identities or deliveries.
+		// Older schemas were backed up before this transaction.
 		return tx.Bucket([]byte("meta")).Put([]byte("state_schema_version"), []byte(strconv.Itoa(SchemaVersion)))
 	}); err != nil {
 		_ = db.Close()
@@ -174,6 +177,35 @@ func (s *Store) GetCache(key string) (model.CachedResponse, bool, error) {
 
 func (s *Store) PutCache(key string, response model.CachedResponse) error {
 	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket([]byte("cache")), key, response) })
+}
+
+// PublishStatusWithRuntime updates the immutable runtime metadata used by all
+// subsequent status snapshots. Passing nil retains the previous metadata.
+func (s *Store) PublishStatusWithRuntime(running bool, now time.Time, runtime *model.RuntimeStatus) error {
+	if runtime != nil {
+		data, err := json.Marshal(runtime)
+		if err != nil {
+			return err
+		}
+		s.runtimeMu.Lock()
+		s.runtimeJSON = data
+		s.runtimeMu.Unlock()
+	}
+	return s.PublishStatus(running, now)
+}
+
+func (s *Store) runtimeStatus() (*model.RuntimeStatus, error) {
+	s.runtimeMu.RLock()
+	data := s.runtimeJSON
+	s.runtimeMu.RUnlock()
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var runtime model.RuntimeStatus
+	if err := json.Unmarshal(data, &runtime); err != nil {
+		return nil, err
+	}
+	return &runtime, nil
 }
 
 // PublishStatus publishes only operational metadata, allowing status and log

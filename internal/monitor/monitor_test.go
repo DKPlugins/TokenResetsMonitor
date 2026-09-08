@@ -24,6 +24,7 @@ import (
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	cfg := config.Defaults()
+	cfg.Updates.Enabled = false
 	cfg.StatePath = filepath.Join(t.TempDir(), "state.db")
 	cfg.Providers = []config.ProviderFilter{{Slug: "openai-codex"}}
 	return cfg
@@ -401,5 +402,34 @@ func TestContinuousRunCancelsInFlightSendAndKeepsPending(t *testing.T) {
 	status, err := state.ReadStatus(cfg.StatePath)
 	if err != nil || status.Running || status.Pending != 1 || status.Failed != 0 {
 		t.Fatal("shutdown did not preserve pending work", err, status)
+	}
+}
+
+func TestDetailBudgetFailureDoesNotCommitPartialScan(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Webhook.Enabled = true
+	cfg.Webhook.URL = "https://example.test/hook"
+	db, err := state.Open(cfg.StatePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	policy := makePolicy(cfg)
+	if err := db.Reconcile(policy); err != nil {
+		t.Fatal(err)
+	}
+	for _, events := range [][]model.Event{nil, {testEvent("pending")}} {
+		if _, err := db.CommitScan("openai-codex", events, policy, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := &stubSource{events: []model.Event{testEvent("must-not-commit")}, detailErr: api.ErrScanBudget}
+	monitor := &monitor{store: db, source: source, policy: policy, logger: quiet()}
+	if err := monitor.poll(context.Background()); err == nil {
+		t.Fatal("oversized scan reported success")
+	}
+	due, err := db.Due("webhook", time.Now(), 0)
+	if err != nil || len(due) != 1 || due[0].Notification.Event.ID != "pending" {
+		t.Fatalf("oversized detail scan changed the durable queue: %+v %v", due, err)
 	}
 }

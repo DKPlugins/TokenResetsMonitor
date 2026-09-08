@@ -19,3 +19,10 @@ logs
 diagnostics*
 backups
 **/testdata/private
+
+# Local configuration, migration backups and IDE indexes never enter image layers.
+/config/
+*.backup-*
+.code-graph
+.config-*
+.status-*

@@ -70,12 +70,13 @@ type CachedResponse struct {
 }
 
 type DeliveryResult struct {
-	Success    bool
-	Retryable  bool
-	RetryAfter time.Duration
-	StatusCode int
-	Error      string
-	Duration   time.Duration
+	Success     bool
+	Retryable   bool
+	RateLimited bool
+	RetryAfter  time.Duration
+	StatusCode  int
+	Error       string
+	Duration    time.Duration
 }
 
 type Preview struct {
@@ -87,15 +88,30 @@ type Preview struct {
 }
 
 type ProviderStatus struct {
-	Ready       bool       `json:"ready"`
-	LastSuccess *time.Time `json:"last_success,omitempty"`
-	LastError   string     `json:"last_error,omitempty"`
+	Ready         bool       `json:"ready"`
+	LastSuccess   *time.Time `json:"last_success,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+	Pending       int        `json:"pending"`
+	Failed        int        `json:"failed"`
+	OldestPending *time.Time `json:"oldest_pending,omitempty"`
+}
+
+// ChannelStatus contains operational counts only, never recipient credentials.
+type ChannelStatus struct {
+	Pending       int        `json:"pending"`
+	Failed        int        `json:"failed"`
+	Delivered     int        `json:"delivered"`
+	Canceled      int        `json:"canceled"`
+	OldestPending *time.Time `json:"oldest_pending,omitempty"`
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 }
 
 type Status struct {
 	UpdatedAt time.Time                 `json:"updated_at"`
 	Running   bool                      `json:"running"`
 	Providers map[string]ProviderStatus `json:"providers"`
+	Channels  map[string]ChannelStatus  `json:"channels,omitempty"`
+	Runtime   *RuntimeStatus            `json:"runtime,omitempty"`
 	Pending   int                       `json:"pending"`
 	Failed    int                       `json:"failed"`
 }

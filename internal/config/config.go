@@ -3,23 +3,24 @@ package config
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
-	"text/template"
 	"time"
 
+	"github.com/DKPlugins/TokenResetsMonitor/internal/fileio"
 	"gopkg.in/yaml.v3"
 )
 
-const Version = 1
+const Version = 2
 
 var envReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -41,28 +42,90 @@ func Defaults() Config {
 		PollInterval: "30m", RequestTimeout: "30s", StatePath: filepath.Join(base, "state.db"),
 		Providers:  []ProviderFilter{{Slug: "openai-codex"}, {Slug: "anthropic-claude"}},
 		EventTypes: []string{"hard_reset"}, MinimumConfidence: "reported", UnknownScope: "include",
-		Webhook:  Webhook{Method: "POST", Timeout: "15s", Headers: map[string]string{}},
-		Telegram: Telegram{Timeout: "15s", APIBaseURL: "https://api.telegram.org"},
-		Logging:  Logging{Level: "info", Format: "text", Directory: filepath.Join(base, "logs"), MaxSizeMB: 10, MaxBackups: 5, MaxAgeDays: 14},
+		Webhook:       Webhook{Method: "POST", Timeout: "15s", Headers: map[string]string{}},
+		Telegram:      Telegram{Timeout: "15s", APIBaseURL: "https://api.telegram.org"},
+		Slack:         Slack{Timeout: "15s"},
+		Reload:        Reload{Enabled: true},
+		Observability: Observability{Listen: "127.0.0.1:9090"},
+		Updates:       Updates{Enabled: true, Interval: "24h"},
+		Logging:       Logging{Level: "info", Format: "text", Directory: filepath.Join(base, "logs"), MaxSizeMB: 10, MaxBackups: 5, MaxAgeDays: 14},
 	}
 }
 
 func Load(path string, overrides map[string]string) (Config, error) {
-	cfg := Defaults()
-	cfg.ConfigVersion = 0 // A missing version is legacy input and requires explicit migration.
 	data, err := readConfig(path)
 	if err != nil {
-		return cfg, err
+		return Config{}, err
 	}
-	if err = decode(data, &cfg); err != nil {
+	return LoadBytes(data, path, overrides)
+}
+
+// LoadBytes resolves the exact snapshot supplied by the caller; it never rereads
+// the file. Call Validate before starting or replacing a runtime configuration.
+func LoadBytes(data []byte, path string, overrides map[string]string) (Config, error) {
+	cfg, err := decodeRaw(data)
+	if err != nil {
 		return cfg, err
-	}
-	if cfg.ConfigVersion != Version {
-		return cfg, errors.New("unsupported config_version; use config migrate for older configurations")
 	}
 	if err = ApplyEnvironment(&cfg, overrides); err != nil {
 		return cfg, err
 	}
+	return resolvePaths(cfg, path)
+}
+
+func decodeRaw(data []byte) (Config, error) {
+	cfg := Defaults()
+	cfg.ConfigVersion = 0
+	if len(data) > 1024*1024 {
+		return cfg, errors.New("configuration exceeds 1 MiB")
+	}
+	if err := decode(data, &cfg); err != nil {
+		return cfg, err
+	}
+	if cfg.ConfigVersion == 1 {
+		cfg.ConfigVersion = Version
+	}
+	if cfg.ConfigVersion != Version {
+		return cfg, errors.New("unsupported config_version; use config migrate for older configurations")
+	}
+	return cfg, nil
+}
+
+// ReadRaw returns unresolved values for setup editing and the original bytes for
+// concurrent-edit detection. A v1 file is upgraded in memory without rewriting it.
+func ReadRaw(path string) (Config, []byte, error) {
+	data, err := readConfig(path)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	cfg, err := decodeRaw(data)
+	return cfg, data, err
+}
+
+// LoadStructural loads operational paths without requiring notification secrets.
+// It is suitable for status and diagnostics, never for sending notifications.
+func LoadStructural(path string, overrides map[string]string) (Config, error) {
+	cfg, _, err := ReadRaw(path)
+	if err != nil {
+		return cfg, err
+	}
+	operational := struct {
+		StatePath     string        `yaml:"state_path"`
+		Logging       Logging       `yaml:"logging"`
+		Observability Observability `yaml:"observability"`
+		Updates       Updates       `yaml:"updates"`
+	}{cfg.StatePath, cfg.Logging, cfg.Observability, cfg.Updates}
+	if err = apply(reflect.ValueOf(&operational).Elem(), "", overrides); err != nil {
+		return cfg, err
+	}
+	cfg.StatePath, cfg.Logging, cfg.Observability, cfg.Updates = operational.StatePath, operational.Logging, operational.Observability, operational.Updates
+	if cfg.StatePath == "" {
+		return cfg, errors.New("state_path cannot be empty")
+	}
+	return resolvePaths(cfg, path)
+}
+
+func resolvePaths(cfg Config, path string) (Config, error) {
 	base, err := filepath.Abs(filepath.Dir(path))
 	if err != nil {
 		return cfg, errors.New("invalid configuration directory")
@@ -77,7 +140,7 @@ func Load(path string, overrides map[string]string) (Config, error) {
 }
 
 func readConfig(path string) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := fileio.OpenSnapshot(path)
 	if err != nil {
 		return nil, errors.New("cannot read configuration; run init or specify --config")
 	}
@@ -118,7 +181,13 @@ func ApplyEnvironment(cfg *Config, overrides map[string]string) error {
 	return nil
 }
 
+type stringResolver func(value, key string) (string, error)
+
 func apply(v reflect.Value, prefix string, overrides map[string]string) error {
+	return applyResolved(v, prefix, overrides, resolveStrict)
+}
+
+func applyResolved(v reflect.Value, prefix string, overrides map[string]string, resolve stringResolver) error {
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
@@ -131,7 +200,7 @@ func apply(v reflect.Value, prefix string, overrides map[string]string) error {
 			key = prefix + "_" + name
 		}
 		if field.Kind() == reflect.Struct {
-			if err := apply(field, key, overrides); err != nil {
+			if err := applyResolved(field, key, overrides, resolve); err != nil {
 				return err
 			}
 			continue
@@ -157,37 +226,46 @@ func apply(v reflect.Value, prefix string, overrides map[string]string) error {
 				field.Set(fresh.Elem())
 			}
 		}
-		if err := expand(field, key); err != nil {
+		if err := expandResolved(field, key, resolve); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func expand(v reflect.Value, key string) error {
+func resolveStrict(value, key string) (string, error) {
+	missing := false
+	expanded := envReference.ReplaceAllStringFunc(value, func(ref string) string {
+		value, ok := os.LookupEnv(ref[2 : len(ref)-1])
+		if !ok {
+			missing = true
+		}
+		return value
+	})
+	if missing {
+		return "", fmt.Errorf("unset environment reference in %s", key)
+	}
+	return expanded, nil
+}
+
+func expandResolved(v reflect.Value, key string, resolve stringResolver) error {
 	switch v.Kind() {
 	case reflect.String:
-		var missing bool
-		value := envReference.ReplaceAllStringFunc(v.String(), func(ref string) string {
-			value, ok := os.LookupEnv(ref[2 : len(ref)-1])
-			if !ok {
-				missing = true
-			}
-			return value
-		})
-		if missing {
-			return fmt.Errorf("unset environment reference in %s", key)
+		value, err := resolve(v.String(), key)
+		if err != nil {
+			return err
 		}
 		v.SetString(value)
 	case reflect.Slice:
 		for i := 0; i < v.Len(); i++ {
-			if err := expand(v.Index(i), key); err != nil {
+			if err := expandResolved(v.Index(i), fmt.Sprintf("%s[%d]", key, i), resolve); err != nil {
 				return err
 			}
 		}
 	case reflect.Struct:
 		for i := 0; i < v.NumField(); i++ {
-			if err := expand(v.Field(i), key); err != nil {
+			name := strings.Split(v.Type().Field(i).Tag.Get("yaml"), ",")[0]
+			if err := expandResolved(v.Field(i), key+"."+name, resolve); err != nil {
 				return err
 			}
 		}
@@ -196,7 +274,7 @@ func expand(v reflect.Value, key string) error {
 		for iter.Next() {
 			copy := reflect.New(iter.Value().Type()).Elem()
 			copy.Set(iter.Value())
-			if err := expand(copy, key); err != nil {
+			if err := expandResolved(copy, key, resolve); err != nil {
 				return err
 			}
 			v.SetMapIndex(iter.Key(), copy)
@@ -218,7 +296,7 @@ func Validate(cfg Config) error {
 	if d, e := time.ParseDuration(cfg.PollInterval); e != nil || d < time.Minute {
 		return errors.New("poll_interval must be at least 1m")
 	}
-	for name, value := range map[string]string{"request_timeout": cfg.RequestTimeout, "webhook.timeout": cfg.Webhook.Timeout, "telegram.timeout": cfg.Telegram.Timeout} {
+	for name, value := range map[string]string{"request_timeout": cfg.RequestTimeout, "webhook.timeout": cfg.Webhook.Timeout, "telegram.timeout": cfg.Telegram.Timeout, "slack.timeout": cfg.Slack.Timeout} {
 		if d, e := time.ParseDuration(value); e != nil || d <= 0 || d > 10*time.Minute {
 			return fmt.Errorf("%s must be positive and at most 10m", name)
 		}
@@ -269,6 +347,19 @@ func Validate(cfg Config) error {
 			return err
 		}
 	}
+	if cfg.Slack.Enabled {
+		if err := ValidateChannel(cfg, "slack"); err != nil {
+			return err
+		}
+	}
+	if _, port, err := net.SplitHostPort(cfg.Observability.Listen); err != nil {
+		return errors.New("observability.listen must be a host:port address")
+	} else if n, e := strconv.Atoi(port); e != nil || n < 1 || n > 65535 {
+		return errors.New("observability.listen port must be between 1 and 65535")
+	}
+	if d, e := time.ParseDuration(cfg.Updates.Interval); e != nil || d < time.Hour || d > 7*24*time.Hour {
+		return errors.New("updates.interval must be between 1h and 168h")
+	}
 	switch cfg.Logging.Level {
 	case "debug", "info", "warn", "error":
 	default:
@@ -301,12 +392,10 @@ func ValidateChannel(cfg Config, channel string) error {
 				return errors.New("webhook header overrides a reserved transport header")
 			}
 		}
-		if cfg.Webhook.BodyTemplate != "" {
-			_, err := template.New("body").Funcs(template.FuncMap{"json": func(v any) (string, error) { b, e := json.Marshal(v); return string(b), e }}).Parse(cfg.Webhook.BodyTemplate)
-			if err != nil {
-				return errors.New("invalid webhook.body_template (content omitted)")
-			}
+		if err := ValidateTemplate(cfg.Webhook.BodyTemplate); err != nil {
+			return err
 		}
+
 	case "telegram":
 		if cfg.Telegram.BotToken == "" || cfg.Telegram.ChatID == "" {
 			return errors.New("telegram.bot_token and telegram.chat_id are required")
@@ -322,6 +411,10 @@ func ValidateChannel(cfg Config, channel string) error {
 		}
 		if cfg.Telegram.MessageThreadID < 0 {
 			return errors.New("telegram.message_thread_id must be nonnegative")
+		}
+	case "slack":
+		if !validURL(cfg.Slack.WebhookURL) {
+			return errors.New("slack.webhook_url must be an absolute HTTP(S) URL without credentials or fragment")
 		}
 	default:
 		return errors.New("unknown notification channel")
@@ -355,7 +448,7 @@ func WriteNewBytes(path string, data []byte) error {
 	if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 		return errors.New("cannot create configuration directory")
 	}
-	f, e := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, e := fileio.CreatePrivate(path)
 	if e != nil {
 		return errors.New("cannot create configuration; destination may already exist")
 	}
@@ -378,70 +471,49 @@ func WriteNewBytes(path string, data []byte) error {
 	return nil
 }
 
-// Migrate keeps the original bytes in a backup and only rewrites known v0 data explicitly.
+// Migrate preserves the original bytes and upgrades only the version field.
 func Migrate(path string, applyChanges bool) (string, error) {
-	data, e := readConfig(path)
-	if e != nil {
-		return "", errors.New("cannot read configuration")
+	data, err := readConfig(path)
+	if err != nil {
+		return "", err
 	}
 	var cfg Config
-	if e = decode(data, &cfg); e != nil {
-		return "", e
+	if err := decode(data, &cfg); err != nil {
+		return "", err
 	}
-	if cfg.ConfigVersion > Version || cfg.ConfigVersion < 0 {
+	if cfg.ConfigVersion < 0 || cfg.ConfigVersion > Version {
 		return "", errors.New("unsupported configuration version")
 	}
 	if cfg.ConfigVersion == Version {
-		return "Configuration is already at version 1.", nil
+		return fmt.Sprintf("Configuration is already at version %d.", Version), nil
 	}
 	if !applyChanges {
-		return "Would migrate config_version 0 to 1; all existing keys and environment references are preserved. Use --apply to create a backup and write the result.", nil
+		return fmt.Sprintf("Would migrate config_version %d to %d; existing keys, comments and environment references are preserved. Use --apply to create a backup and write the result.", cfg.ConfigVersion, Version), nil
 	}
-	var doc yaml.Node
-	if e = yaml.Unmarshal(data, &doc); e != nil {
-		return "", errors.New("invalid configuration")
+	out, err := patchDocument(data, "", nil)
+	if err != nil {
+		return "", err
 	}
-	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return "", errors.New("configuration must be a mapping")
+	if err := writeUpdated(path, data, out); err != nil {
+		return "", err
 	}
-	m := doc.Content[0]
-	found := false
-	for i := 0; i < len(m.Content); i += 2 {
-		if m.Content[i].Value == "config_version" {
-			m.Content[i+1].Value = "1"
-			m.Content[i+1].Tag = "!!int"
-			found = true
-		}
+	return fmt.Sprintf("Migrated configuration to version %d; original saved in a sibling .backup file.", Version), nil
+}
+
+// ResolveChannel applies environment precedence to one destination without requiring
+// unrelated channel secrets (used by setup and channel diagnostics).
+func ResolveChannel(cfg Config, channel string) (Config, error) {
+	var value any
+	switch channel {
+	case "telegram":
+		value = &cfg.Telegram
+	case "slack":
+		value = &cfg.Slack
+	case "webhook":
+		value = &cfg.Webhook
+	default:
+		return cfg, errors.New("unknown notification channel")
 	}
-	if !found {
-		m.Content = append([]*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: "config_version"}, {Kind: yaml.ScalarNode, Tag: "!!int", Value: "1"}}, m.Content...)
-	}
-	out, e := yaml.Marshal(&doc)
-	if e != nil {
-		return "", errors.New("cannot encode migrated configuration")
-	}
-	backup := path + ".backup-" + time.Now().UTC().Format("20060102T150405.000000000Z")
-	if e = WriteNewBytes(backup, data); e != nil {
-		return "", e
-	}
-	temp, e := os.CreateTemp(filepath.Dir(path), ".config-migration-*")
-	if e != nil {
-		return "", errors.New("cannot create migration output")
-	}
-	name := temp.Name()
-	defer os.Remove(name)
-	if e = temp.Chmod(0600); e == nil {
-		_, e = temp.Write(out)
-	}
-	if e == nil {
-		e = temp.Sync()
-	}
-	ce := temp.Close()
-	if e != nil || ce != nil {
-		return "", errors.New("cannot write migration output")
-	}
-	if e = os.Rename(name, path); e != nil {
-		return "", errors.New("cannot replace configuration; backup was preserved")
-	}
-	return "Migrated configuration to version 1; original saved in a sibling .backup file.", nil
+	err := apply(reflect.ValueOf(value).Elem(), channel, nil)
+	return cfg, err
 }

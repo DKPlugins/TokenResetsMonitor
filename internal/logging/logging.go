@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DKPlugins/TokenResetsMonitor/internal/config"
@@ -28,7 +29,7 @@ const maxLogRecordBytes = 1 << 20
 type Redactor struct{ secrets []string }
 
 func NewRedactor(cfg config.Config) *Redactor {
-	values := []string{cfg.Webhook.URL, cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Webhook.BodyTemplate}
+	values := []string{cfg.Webhook.URL, cfg.Telegram.BotToken, cfg.Telegram.ChatID, cfg.Webhook.BodyTemplate, cfg.Slack.WebhookURL}
 	for _, value := range cfg.Webhook.Headers {
 		values = append(values, value)
 		if strings.HasPrefix(value, "Bearer ") {
@@ -160,13 +161,53 @@ func (h multiHandler) WithGroup(g string) slog.Handler {
 	return n
 }
 
-func New(cfg config.Config, stdout io.Writer, diagnostics ...io.Writer) (*slog.Logger, func() error, error) {
-	var level slog.Level
-	if e := level.UnmarshalText([]byte(cfg.Logging.Level)); e != nil {
-		return nil, nil, fmt.Errorf("invalid log level")
+type RuntimeControl struct {
+	mu       sync.Mutex
+	level    slog.LevelVar
+	redactor atomic.Pointer[Redactor]
+	previous *Redactor
+	settings config.Logging
+}
+
+// Apply changes the level and secret redaction without opening another writer.
+// Changes to file layout/format must be rejected by the runtime reload policy.
+func (c *RuntimeControl) Apply(cfg config.Config) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	settings := cfg.Logging
+	settings.Level = c.settings.Level
+	if settings != c.settings {
+		return errors.New("logging output settings require a restart")
 	}
-	r := NewRedactor(cfg)
-	opts := &slog.HandlerOptions{Level: level, ReplaceAttr: r.Attr}
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(cfg.Logging.Level)); err != nil {
+		return errors.New("invalid log level")
+	}
+	next := NewRedactor(cfg)
+	combined := &Redactor{secrets: append([]string{}, next.secrets...)}
+	if c.previous != nil {
+		combined.secrets = append(combined.secrets, c.previous.secrets...)
+	}
+	sort.Slice(combined.secrets, func(i, j int) bool { return len(combined.secrets[i]) > len(combined.secrets[j]) })
+	c.redactor.Store(combined)
+	c.previous = next
+	c.level.Set(level)
+	return nil
+}
+
+func New(cfg config.Config, stdout io.Writer, diagnostics ...io.Writer) (*slog.Logger, func() error, error) {
+	logger, _, closeFn, err := NewRuntime(cfg, stdout, diagnostics...)
+	return logger, closeFn, err
+}
+
+func NewRuntime(cfg config.Config, stdout io.Writer, diagnostics ...io.Writer) (*slog.Logger, *RuntimeControl, func() error, error) {
+	control := &RuntimeControl{settings: cfg.Logging}
+	if err := control.Apply(cfg); err != nil {
+		return nil, nil, nil, err
+	}
+	opts := &slog.HandlerOptions{Level: &control.level, ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+		return control.redactor.Load().Attr(groups, a)
+	}}
 	var console slog.Handler = slog.NewTextHandler(stdout, opts)
 	if cfg.Logging.Format == "json" {
 		console = slog.NewJSONHandler(stdout, opts)
@@ -189,7 +230,7 @@ func New(cfg config.Config, stdout io.Writer, diagnostics ...io.Writer) (*slog.L
 		}
 		return failures.err()
 	}
-	return slog.New(h), closeFn, nil
+	return slog.New(h), control, closeFn, nil
 }
 
 // Opening is delayed until the monitor has acquired its exclusive state lock.

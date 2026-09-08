@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"text/template"
 	"time"
 	"unicode/utf8"
 
@@ -117,17 +116,10 @@ func (s *Sender) render(channel string, n model.Notification) (rendered, error) 
 		if c.BodyTemplate == "" {
 			r.body, err = json.Marshal(n)
 		} else {
-			t, parseErr := template.New("webhook").Option("missingkey=error").Funcs(template.FuncMap{
-				"json": func(value any) (string, error) { b, e := json.Marshal(value); return string(b), e },
-			}).Parse(c.BodyTemplate)
-			if parseErr != nil {
-				return r, errors.New("webhook body template is invalid")
+			r.body, err = config.RenderTemplate(c.BodyTemplate, n)
+			if err != nil {
+				return r, err
 			}
-			var out limitedBuffer
-			if t.Execute(&out, n) != nil {
-				return r, errors.New("webhook body template failed to render or exceeds size limit")
-			}
-			r.body = out.Bytes()
 		}
 	case "telegram":
 		c := s.cfg.Telegram
@@ -169,6 +161,10 @@ func (s *Sender) render(channel string, n model.Notification) (rendered, error) 
 			LinkPreviewOptions: struct {
 				IsDisabled bool `json:"is_disabled"`
 			}{true}})
+	case "slack":
+		if err := renderSlack(s.cfg.Slack, n, &r); err != nil {
+			return r, err
+		}
 	default:
 		return r, errors.New("unknown notification channel")
 	}
@@ -183,17 +179,6 @@ func (s *Sender) render(channel string, n model.Notification) (rendered, error) 
 	}
 	return r, nil
 }
-
-type limitedBuffer struct{ bytes.Buffer }
-
-func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > maxBodyBytes {
-		return 0, errors.New("body limit exceeded")
-	}
-	return b.Buffer.Write(p)
-}
-
-func (b *limitedBuffer) WriteString(s string) (int, error) { return b.Write([]byte(s)) }
 
 func validHeaderValue(value string) bool {
 	for i := 0; i < len(value); i++ {
@@ -267,7 +252,11 @@ func (s *Sender) Preview(channel string, n model.Notification) (model.Preview, e
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return model.Preview{Channel: channel, Method: r.method, Destination: u.Scheme + "://" + u.Host + "/[redacted]", HeaderNames: names, BodyBytes: len(r.body)}, nil
+	destination := u.Scheme + "://" + u.Host + "/[redacted]"
+	if channel == "slack" {
+		destination = "[redacted]"
+	}
+	return model.Preview{Channel: channel, Method: r.method, Destination: destination, HeaderNames: names, BodyBytes: len(r.body)}, nil
 }
 
 // Send performs exactly one attempt. Retry scheduling belongs to the monitor.
@@ -301,7 +290,12 @@ func (s *Sender) Send(ctx context.Context, channel string, n model.Notification)
 	}
 	defer res.Body.Close()
 	result.StatusCode = res.StatusCode
+	result.RateLimited = res.StatusCode == http.StatusTooManyRequests
 	result.RetryAfter = api.ParseRetryAfter(res.Header.Get("Retry-After"), time.Now())
+	if channel == "slack" {
+		decodeSlack(res.Body, &result)
+		return result
+	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		result.Retryable = res.StatusCode == 429 || res.StatusCode >= 500
 		result.Error = fmt.Sprintf("notification endpoint returned HTTP %d", res.StatusCode)
@@ -314,6 +308,7 @@ func (s *Sender) Send(ctx context.Context, channel string, n model.Notification)
 		decodeTelegram(res.Body, &result, true)
 		return result
 	}
+
 	// A 2xx is success even if the response body is empty, oversized or malformed.
 	// Do not let an irrelevant response body convert accepted delivery into retry.
 	result.Success = true
@@ -335,6 +330,10 @@ func decodeTelegram(body io.Reader, result *model.DeliveryResult, httpSuccess bo
 			result.Retryable = true
 		}
 		return
+	}
+	if response.ErrorCode == 429 {
+		result.RateLimited = true
+		result.Retryable = true
 	}
 	if response.Parameters.RetryAfter != "" {
 		if d := api.ParseRetryAfter(string(response.Parameters.RetryAfter), time.Now()); d > result.RetryAfter {

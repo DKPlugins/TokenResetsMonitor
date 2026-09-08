@@ -1,5 +1,6 @@
-# Public announcements, not personal account usage. Restart after changing settings.
-config_version: 1
+# Public announcements, not personal account usage.
+# Operational YAML changes reload automatically; infrastructure changes need restart.
+config_version: 2
 api_base_url: https://tokenresets.com/api/v1
 poll_interval: 30m
 request_timeout: 30s
@@ -26,6 +27,7 @@ webhook:
   body_template: ""
   timeout: 15s
 telegram:
+  # Run: tokenresetsmonitor setup telegram --config ./config.yaml
   enabled: false
   bot_token: ""
   chat_id: ""
@@ -33,6 +35,23 @@ telegram:
   disable_notification: false
   timeout: 15s
   api_base_url: https://api.telegram.org
+slack:
+  # Run: tokenresetsmonitor setup slack --config ./config.yaml
+  enabled: false
+  # Prefer "${SLACK_WEBHOOK_URL}" with the secret in your service environment.
+  webhook_url: ""
+  timeout: 15s
+reload:
+  enabled: true
+observability:
+  # Trusted local access only. Listener changes require a restart.
+  enabled: false
+  listen: 127.0.0.1:9090
+updates:
+  # Read-only GitHub release checks. No automatic download or installation.
+  enabled: true
+  interval: 24h
+  include_prerelease: false
 logging:
   level: info
   format: text
