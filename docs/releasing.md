@@ -1,6 +1,6 @@
 # Release process
 
-The release line began with `v1.0.0-rc.1`. The completed gates for stable `v1.0.0` are recorded in [acceptance.md](acceptance.md). The next candidate is `v1.1.0-rc.1`; use `v1.0.0` as the previous version for upgrade/rollback acceptance. Re-run these gates for later releases; the checked boxes below describe historical stable acceptance, not automatic approval of the current checkout. Pushing a `v*` tag triggers CI, archive builds, multiarchitecture image publication, and GitHub Release creation. A prerelease tag creates a prerelease on GitHub.
+The release line began with `v1.0.0-rc.1`. The completed gates for stable `v1.0.0` are recorded in [acceptance.md](acceptance.md). The next candidate is `v1.1.0-rc.2`; use `v1.0.0` as the previous version for upgrade/rollback acceptance. Re-run these gates for later releases; the checked boxes below describe historical stable acceptance, not automatic approval of the current checkout. Pushing a `v*` tag triggers CI, archive builds, multiarchitecture image publication, and GitHub Release creation. A prerelease tag creates a prerelease on GitHub.
 
 ## Maintainer preparation
 
@@ -29,19 +29,19 @@ CI automatically tests native service lifecycles on disposable runners and conta
 The local build script requires a POSIX environment, Go, Git, `tar`, `zip`, and `sha256sum`:
 
 ```sh
-sh scripts/release.sh v1.1.0-rc.1
-python3 scripts/verify-release.py dist/v1.1.0-rc.1
+sh scripts/release.sh v1.1.0-rc.2
+python3 scripts/verify-release.py dist/v1.1.0-rc.2
 ```
 
 It creates `dist/<tag>/` containing Linux amd64/arm64 `.tar.gz` archives, a Windows amd64 `.zip`, `checksums.txt`, and standalone installers. Archives contain the binary, example configuration, README, license, changelog, contributor guide, complete docs, Compose file, installers, compatibility manifest, and systemd unit. Release installers default to their own version; compatibility.json is also a standalone checksummed asset. The script refuses to overwrite an existing output directory.
 
-Build information is injected through `internal/buildinfo.Version`, `Commit`, and `Date`. Binaries use the SemVer without the Git tag's `v` prefix. The image uses the exact Git tag, for example `ghcr.io/dkplugins/tokenresetsmonitor:v1.1.0-rc.1`. No moving `latest` tag is published.
+Build information is injected through `internal/buildinfo.Version`, `Commit`, and `Date`. Binaries use the SemVer without the Git tag's `v` prefix. The image uses the exact Git tag, for example `ghcr.io/dkplugins/tokenresetsmonitor:v1.1.0-rc.2`. No moving `latest` tag is published.
 
 After review and acceptance, create an annotated version tag on the intended `main` commit and push that tag. The workflow runs verification before publishing. Do not force-update tags, replace assets, or overwrite a container version. If a publishing job partially succeeds, inspect its artifacts and publish a new candidate tag rather than reusing that version.
 
 PATCH releases contain compatible fixes, MINOR releases add compatible capabilities, and MAJOR releases change existing public contracts incompatibly. Each release should describe configuration/state/webhook schema changes explicitly even when their numbers stay unchanged.
 
-## Gates for 1.1.0-rc.1
+## Gates for 1.1.0-rc.2
 
 - Verify strict pagination completion, scan size limits, revision ordering, destination-wide cooldowns, and old-state migration/rollback fixtures.
 - Verify hidden setup prompts, pairing nonce/update handling, preservation of active bot webhooks, Slack error handling, Windows configuration/backup ACLs, and atomic save conflict detection.
@@ -51,6 +51,6 @@ PATCH releases contain compatible fixes, MINOR releases add compatible capabilit
 - Inspect each release archive for compatibility.json, complete docs, correct embedded versions, and valid checksums. Ensure installers validate with the configured service environment.
 - Repeat native systemd/Windows acceptance on disposable runners. Do not reuse the old acceptance record as evidence for a new release.
 
-For this candidate, local Windows tests/vet, Linux race tests/vet, installer helper regressions, vulnerability scanning, Prometheus fixtures, and amd64 container lifecycle checks have passed. ARM64 image builds and selected CLI checks passed through scoped user-mode QEMU. Native Windows/systemd service acceptance and the full ARM64 container lifecycle must still run on the disposable CI runners for this exact tag; the historical checked boxes do not certify this candidate.
+The [RC1 workflow](https://github.com/DKPlugins/TokenResetsMonitor/actions/runs/34224426948) passed Windows/Linux race tests and vet, native service lifecycles, Prometheus fixtures, and full amd64/arm64 container checks. Publication was blocked because the Windows installer regression script left the exit code from an expected configuration rejection. RC2 fixes that script; all release checks must pass again for its exact tag. Published-installer upgrade and rollback acceptance runs separately after publication.
 
-After the tagged release is published, dispatch **Installer acceptance** with candidate `v1.1.0-rc.1` and previous ref `v1.0.0`. Configuration/state schema 2 requires a pre-migration backup for rollback; the old executable must not be started against the migrated database.
+After the tagged release is published, dispatch **Installer acceptance** with candidate `v1.1.0-rc.2` and previous ref `v1.0.0`. Configuration/state schema 2 requires a pre-migration backup for rollback; the old executable must not be started against the migrated database.

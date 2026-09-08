@@ -109,7 +109,7 @@ telegram:
     function Assert-RejectedConfiguration([string[]]$ExtraArguments) {
         $ErrorActionPreference = 'Continue'
         & $Binary config validate @ExtraArguments --config $deferredPath 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0) { throw 'Invalid or unresolved runtime configuration was accepted.' }
+        if ($LASTEXITCODE -ne 2) { throw "Expected configuration rejection exit 2, got $LASTEXITCODE." }
     }
     Assert-RejectedConfiguration @()
     [IO.File]::WriteAllText($deferredPath, $deferred + "poll_interval: soon`n", [Text.UTF8Encoding]::new($false))
@@ -128,3 +128,7 @@ telegram:
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }
+
+# Expected rejection checks leave a nonzero LASTEXITCODE for CI wrappers.
+# Report success only after every assertion and cleanup has completed.
+exit 0

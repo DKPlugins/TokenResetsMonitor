@@ -6,7 +6,7 @@ on:
       version:
         description: Published candidate tag to install and upgrade in disposable runners
         required: true
-        default: v1.1.0-rc.1
+        default: v1.1.0-rc.2
         type: string
       previous_ref:
         description: Previous immutable Git tag to build for installer upgrade and backup rollback

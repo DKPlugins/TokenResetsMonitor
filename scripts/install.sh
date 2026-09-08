@@ -3,7 +3,7 @@
 set -eu
 umask 077
 
-VERSION=v1.1.0-rc.1
+VERSION=v1.1.0-rc.2
 START=1
 SYSTEMD=1
 REPOSITORY=DKPlugins/TokenResetsMonitor
@@ -32,7 +32,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 printf '%s\n' "$VERSION" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
-    echo 'Version must be a release tag such as v1.1.0-rc.1.' >&2; exit 2;
+    echo 'Version must be a release tag such as v1.1.0-rc.2.' >&2; exit 2;
 }
 [ "$(uname -s)" = Linux ] || { echo 'This installer supports Linux only.' >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo 'Run this installer with sudo or as root.' >&2; exit 2; }

@@ -6,7 +6,7 @@ Get notified when [TokenResets](https://tokenresets.com/api/) publishes an AI qu
 
 **These are public announcements, not a meter for your account's remaining tokens.** An announcement does not confirm that your personal limits have reset. Unknown scope stays unknown; announcement, effective, and detection times are shown separately. Read the source's [methodology](https://tokenresets.com/methodology/). This independent project is not affiliated with TokenResets, OpenAI, Anthropic, Telegram, or Slack.
 
-This checkout is the **1.1.0-rc.1 release candidate**. Slack, assisted setup, live reload, metrics, health checks, and update checking described here require this version. The earlier published stable [v1.0.0 release](https://github.com/DKPlugins/TokenResetsMonitor/releases/tag/v1.0.0) has webhook/Telegram monitoring; its completed checks are preserved in the [historical acceptance record](docs/acceptance.md). This candidate is intended for testing before the stable 1.1 release; publication and platform acceptance are tracked in the [release guide](docs/releasing.md).
+This checkout is the **1.1.0-rc.2 release candidate**. Slack, assisted setup, live reload, metrics, health checks, and update checking described here require this version. The earlier published stable [v1.0.0 release](https://github.com/DKPlugins/TokenResetsMonitor/releases/tag/v1.0.0) has webhook/Telegram monitoring; its completed checks are preserved in the [historical acceptance record](docs/acceptance.md). This candidate is intended for testing before the stable 1.1 release; publication and platform acceptance are tracked in the [release guide](docs/releasing.md).
 
 ## What it does
 
@@ -81,7 +81,7 @@ Edit `config/config.yaml` to select providers and destinations. Mounting the dir
 
 The container runs as UID/GID `10001` with a read-only root filesystem. History is stored in the named `monitor-data` volume. Health checks work without an HTTP port. Metrics listen on port `9090` inside the Compose network; no host port is published. [Scraping metrics and interpreting health →](docs/observability.md)
 
-Once the candidate is published, set `TRM_VERSION=v1.1.0-rc.1`, then use `docker compose pull` and `docker compose up -d --no-build`. The default `local` image is built from this checkout. Preserve the data volume when updating.
+Once the candidate is published, set `TRM_VERSION=v1.1.0-rc.2`, then use `docker compose pull` and `docker compose up -d --no-build`. The default `local` image is built from this checkout. Preserve the data volume when updating.
 
 ## Commands you will use
 

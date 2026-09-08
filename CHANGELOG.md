@@ -2,6 +2,13 @@
 
 All notable changes are recorded here. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.1.0-rc.2
+
+### Fixed
+
+- Return success from the Windows installer regression script only after all assertions and cleanup pass. Expected configuration rejection no longer leaves a failing native exit code for GitHub Actions.
+- Replace the blocked RC1 publication with a new immutable candidate tag; application features and schema compatibility remain unchanged.
+
 ## 1.1.0-rc.1
 
 Release candidate for the 1.1 monitoring and notification features. Keep a pre-migration state backup when testing an upgrade from 1.0.
