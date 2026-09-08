@@ -1,0 +1,26 @@
+services:
+  monitor:
+    image: ghcr.io/dkplugins/tokenresetsmonitor:${TRM_VERSION:-v1.0.0-rc.1}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - monitor-data:/data
+      - ./config.yaml:/config/config.yaml:ro
+    environment:
+      TRM_STATE_PATH: /data/state.db
+      TRM_LOGGING_FORMAT: json
+      TRM_LOGGING_FILE_ENABLED: "false"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+    stop_grace_period: 45s
+
+volumes:
+  monitor-data:

@@ -1,0 +1,32 @@
+[Unit]
+Description=TokenResetsMonitor public reset announcement monitor
+Documentation=https://github.com/DKPlugins/TokenResetsMonitor
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tokenresetsmonitor
+Group=tokenresetsmonitor
+WorkingDirectory=/var/lib/tokenresetsmonitor
+ExecStart=/usr/local/bin/tokenresetsmonitor run --config /etc/tokenresetsmonitor/config.yaml
+EnvironmentFile=-/etc/tokenresetsmonitor/environment
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tokenresetsmonitor /var/log/tokenresetsmonitor
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tokenresetsmonitor
+
+[Install]
+WantedBy=multi-user.target

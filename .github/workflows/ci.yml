@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Test
+        run: go test -race -count=1 ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+      - name: Build
+        run: go build ./cmd/tokenresetsmonitor
+      - name: Parse Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($path in @('scripts/install.ps1', 'scripts/smoke-windows-service.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $path), [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+          }
+      - name: Windows service lifecycle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/smoke-windows-service.ps1
+      - name: Shell and systemd checks
+        if: runner.os == 'Linux'
+        run: |
+          sh -n scripts/install.sh scripts/release.sh scripts/smoke-systemd.sh
+          shellcheck scripts/install.sh scripts/release.sh scripts/smoke-systemd.sh
+          sudo env CI=true sh scripts/smoke-systemd.sh
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Build and run each architecture
+        run: |
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" --load -t "trm-test:$arch" .
+            docker run --rm --platform "linux/$arch" "trm-test:$arch" version
+            docker run --rm --platform "linux/$arch" --read-only --mount "type=bind,src=$PWD/config.example.yaml,dst=/config/config.yaml,readonly" "trm-test:$arch" config validate --config /config/config.yaml
+            volume="trm-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$arch"
+            docker volume create "$volume"
+            trap 'docker volume rm "$volume"' EXIT
+            if docker run --rm --platform "linux/$arch" --read-only \
+                --mount "type=volume,src=$volume,dst=/data" \
+                --mount "type=bind,src=$PWD/config.example.yaml,dst=/config/config.yaml,readonly" \
+                -e TRM_API_BASE_URL=http://127.0.0.1:1/api/v1 "trm-test:$arch" run --once --config /config/config.yaml; then
+              echo 'The unavailable fixture API should cause a failed one-shot scan.' >&2
+              exit 1
+            else
+              test "$?" -eq 1
+            fi
+            docker run --rm --platform "linux/$arch" --read-only \
+              --mount "type=volume,src=$volume,dst=/data" \
+              --mount "type=bind,src=$PWD/config.example.yaml,dst=/config/config.yaml,readonly" \
+              "trm-test:$arch" status --json --config /config/config.yaml > status.json
+            jq -e '.running == false and .pending == 0 and (.providers | length == 2) and ([.providers[].ready] | all(. == false))' status.json
+            docker run --rm --platform "linux/$arch" --read-only --mount "type=volume,src=$volume,dst=/data" \
+              --entrypoint sh "trm-test:$arch" -c 'test "$(id -u)" = 10001 && test -s /data/state.db && test "$(stat -c %u /data/state.db)" = 10001'
+            docker volume rm "$volume"
+            trap - EXIT
+          done
+          docker compose config --quiet

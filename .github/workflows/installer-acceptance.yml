@@ -1,0 +1,110 @@
+name: Installer acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published candidate tag to install and upgrade in disposable runners
+        required: true
+        default: v1.0.0-rc.1
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Download the published installer
+        run: |
+          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
+          mkdir -p "$RUNNER_TEMP/trm-installer-acceptance"
+          gh release download "$RELEASE_TAG" --pattern install.sh --dir "$RUNNER_TEMP/trm-installer-acceptance"
+      - name: Install, run, update, and verify preserved state
+        run: |
+          set -eu
+          installer="$RUNNER_TEMP/trm-installer-acceptance/install.sh"
+          sudo env TRM_API_BASE_URL=http://127.0.0.1:1/api/v1 sh "$installer" --version "$RELEASE_TAG" --no-start
+          sudo systemctl start tokenresetsmonitor
+          sleep 2
+          sudo systemctl is-active --quiet tokenresetsmonitor
+          sudo systemctl stop tokenresetsmonitor
+          sudo test -s /var/lib/tokenresetsmonitor/state.db
+          sudo sha256sum /etc/tokenresetsmonitor/config.yaml /var/lib/tokenresetsmonitor/state.db > "$RUNNER_TEMP/trm-before.sha256"
+          sudo sh "$installer" --version "$RELEASE_TAG" --no-start
+          sudo sha256sum --check "$RUNNER_TEMP/trm-before.sha256"
+          sudo test -n "$(sudo find /var/backups/tokenresetsmonitor -name state.db -type f -print -quit)"
+          sudo systemctl start tokenresetsmonitor
+          sleep 2
+          sudo systemctl is-active --quiet tokenresetsmonitor
+          sudo tokenresetsmonitor status --json --config /etc/tokenresetsmonitor/config.yaml
+          sudo systemctl stop tokenresetsmonitor
+          tokenresetsmonitor version
+      - name: Show service diagnostics
+        if: always()
+        run: sudo journalctl -u tokenresetsmonitor --no-pager -n 50 || true
+
+  windows:
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Download the published installer
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$') { throw 'Invalid release tag.' }
+          $target = Join-Path $env:RUNNER_TEMP 'trm-installer-acceptance'
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+          gh release download $env:RELEASE_TAG --pattern install.ps1 --dir $target
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot download published installer.' }
+      - name: Install, run, update, and verify preserved state
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'trm-installer-acceptance/install.ps1'
+          $installDir = Join-Path $env:RUNNER_TEMP 'TRM acceptance binary'
+          $dataDir = Join-Path $env:RUNNER_TEMP 'TRM acceptance data'
+          $env:TRM_API_BASE_URL = 'http://127.0.0.1:1/api/v1'
+          & $installer -Version $env:RELEASE_TAG -InstallDir $installDir -DataDir $dataDir -NoStart
+          $binary = Join-Path $installDir 'tokenresetsmonitor.exe'
+          $config = Join-Path $dataDir 'config.yaml'
+          $state = Join-Path $dataDir 'data/state.db'
+          & $binary service start
+          if ($LASTEXITCODE -ne 0) { throw 'Service start failed.' }
+          Start-Sleep -Seconds 2
+          if ((Get-Service TokenResetsMonitor).Status -ne 'Running') { throw 'Service is not running.' }
+          & $binary service stop
+          if ($LASTEXITCODE -ne 0) { throw 'Service stop failed.' }
+          $beforeConfig = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash
+          $beforeState = (Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash
+          & $installer -Version $env:RELEASE_TAG -InstallDir $installDir -DataDir $dataDir -NoStart
+          if ((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash -ne $beforeConfig) { throw 'Update changed configuration.' }
+          if ((Get-FileHash -LiteralPath $state -Algorithm SHA256).Hash -ne $beforeState) { throw 'Update changed stopped state.' }
+          if (@(Get-ChildItem -LiteralPath (Join-Path $dataDir 'backups') -Filter state.db -Recurse -File).Count -lt 1) { throw 'State backup is missing.' }
+          & $binary service start
+          if ($LASTEXITCODE -ne 0) { throw 'Restart failed.' }
+          Start-Sleep -Seconds 2
+          if ((Get-Service TokenResetsMonitor).Status -ne 'Running') { throw 'Updated service is not running.' }
+          & $binary service stop
+          if ($LASTEXITCODE -ne 0) { throw 'Updated service stop failed.' }
+          & $binary version
+          & $binary service uninstall
+          if ($LASTEXITCODE -ne 0) { throw 'Service uninstall failed.' }
+          if (-not (Test-Path -LiteralPath $config) -or -not (Test-Path -LiteralPath $state)) { throw 'Uninstall deleted persistent data.' }
+      - name: Show service diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'TokenResetsMonitor' } -MaxEvents 20 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
+          exit 0

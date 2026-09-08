@@ -1,0 +1,43 @@
+# Public announcements, not personal account usage. Restart after changing settings.
+config_version: 1
+api_base_url: https://tokenresets.com/api/v1
+poll_interval: 30m
+request_timeout: 30s
+state_path: ./data/state.db
+providers:
+  - slug: openai-codex
+    plans: []
+    products: []
+    windows: []
+  - slug: anthropic-claude
+    plans: []
+    products: []
+    windows: []
+event_types: [hard_reset]
+minimum_confidence: reported
+unknown_scope: include
+webhook:
+  enabled: false
+  url: ""
+  method: POST
+  headers: {}
+  # Example: Authorization: "Bearer ${WEBHOOK_TOKEN}"
+  # Empty template sends the versioned JSON notification.
+  body_template: ""
+  timeout: 15s
+telegram:
+  enabled: false
+  bot_token: ""
+  chat_id: ""
+  message_thread_id: 0
+  disable_notification: false
+  timeout: 15s
+  api_base_url: https://api.telegram.org
+logging:
+  level: info
+  format: text
+  file_enabled: false
+  directory: ./logs
+  max_size_mb: 10
+  max_backups: 5
+  max_age_days: 14
