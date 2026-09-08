@@ -2,6 +2,14 @@
 
 Recorded on 2026-09-08. Application, configuration, state, and webhook versions are independent; configuration, state, and webhook schemas remain `1` throughout this release line.
 
+## Stable release
+
+[`v1.0.0`](https://github.com/DKPlugins/TokenResetsMonitor/releases/tag/v1.0.0), source commit `2e43e5c17ab29c09e0d9b97d0d1a4b7164206ad5`, passed its [release workflow](https://github.com/DKPlugins/TokenResetsMonitor/actions/runs/34212987851) and [final published-artifact acceptance](https://github.com/DKPlugins/TokenResetsMonitor/actions/runs/34213326058).
+
+Both Windows and Linux installed the published stable release, rejected tampered archives, upgraded a source-built rc.4 binary, restored a working prior service from installer backups, and preserved pending delivery identity across upgrade and rollback. Both published container architectures were pulled anonymously and ran as UID `10001` with a read-only root and networking disabled for the runtime smoke check.
+
+All six stable assets were downloaded and verified against GitHub's sizes and SHA-256 digests; all five `checksums.txt` payload entries matched. The Windows executable reported version `1.0.0`, the source commit above, Go `1.26.0`, bbolt `1.5.0`, `x/sys 0.45.0`, and a clean source tree. The release is stable and immutable. No acceptance gates remain open.
+
 ## Accepted candidate
 
 `v1.0.0-rc.4`, source commit `5436864615070c299d9348e1ebc7f778b63d096e`, passed the [release workflow](https://github.com/DKPlugins/TokenResetsMonitor/actions/runs/34211959021) and [published-artifact acceptance](https://github.com/DKPlugins/TokenResetsMonitor/actions/runs/34212291430).
