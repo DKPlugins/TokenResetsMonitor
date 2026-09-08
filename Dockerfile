@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags="-s -w -X github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo.Version=${VERSION} -X github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo.Commit=${COMMIT} -X github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo.Date=${BUILD_DATE}" \
     -o /out/tokenresetsmonitor ./cmd/tokenresetsmonitor
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -g 10001 monitor \
     && adduser -D -H -u 10001 -G monitor monitor \
