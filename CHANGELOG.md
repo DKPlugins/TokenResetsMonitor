@@ -4,6 +4,18 @@ All notable changes are recorded here. This project follows [Semantic Versioning
 
 ## Unreleased
 
+## 1.0.0-rc.3
+
+### Fixed
+
+- Restore absent environment overrides correctly after Windows installer initialization in PowerShell 7.
+- Keep optional Windows Event Log diagnostics from failing installer acceptance when no provider is registered.
+
+### Maintenance
+
+- Group dependency updates into one weekly pull request and delete branches after merging.
+- Exercise published installers, tampered checksums, upgrades, backup restoration, and pending-delivery identity on Linux and Windows.
+
 ## 1.0.0-rc.2
 
 ### Fixed

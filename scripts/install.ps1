@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^v\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$')]
-    [string]$Version = 'v1.0.0-rc.2',
+    [string]$Version = 'v1.0.0-rc.3',
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'TokenResetsMonitor'),
     [string]$DataDir = (Join-Path $env:ProgramData 'TokenResetsMonitor'),
     [switch]$NoStart
@@ -19,6 +19,28 @@ function Invoke-Monitor {
     param([string]$Path, [string[]]$Arguments)
     & $Path @Arguments
     if ($LASTEXITCODE -ne 0) { throw "Monitor command failed (exit $LASTEXITCODE)." }
+}
+
+function Invoke-WithTemporaryEnvironment {
+    param([hashtable]$Variables, [scriptblock]$Action)
+    $original = @{}
+    try {
+        foreach ($name in $Variables.Keys) {
+            $original[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+            [Environment]::SetEnvironmentVariable($name, $Variables[$name], 'Process')
+        }
+        & $Action
+    } finally {
+        foreach ($name in $original.Keys) {
+            if ($null -eq $original[$name]) {
+                # PowerShell can bind $null to an empty string for .NET calls.
+                # Recent .NET versions preserve that as an empty override.
+                Remove-Item -LiteralPath ('Env:\' + $name) -ErrorAction SilentlyContinue
+            } else {
+                [Environment]::SetEnvironmentVariable($name, $original[$name], 'Process')
+            }
+        }
+    }
 }
 
 function Set-PrivateDirectoryAcl {
@@ -137,15 +159,8 @@ try {
             TRM_LOGGING_FILE_ENABLED = 'true'
             TRM_LOGGING_DIRECTORY = $logsDir
         }
-        $oldEnvironment = @{}
-        try {
-            foreach ($key in $initialEnvironment.Keys) {
-                $oldEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
-                [Environment]::SetEnvironmentVariable($key, $initialEnvironment[$key], 'Process')
-            }
+        Invoke-WithTemporaryEnvironment $initialEnvironment {
             Invoke-Monitor $executable @('init', '--defaults', '--config', $config)
-        } finally {
-            foreach ($key in $oldEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $oldEnvironment[$key], 'Process') }
         }
     }
     Invoke-Monitor $executable @('config', 'validate', '--config', $config)

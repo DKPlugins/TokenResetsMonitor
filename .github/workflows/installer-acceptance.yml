@@ -6,12 +6,12 @@ on:
       version:
         description: Published candidate tag to install and upgrade in disposable runners
         required: true
-        default: v1.0.0-rc.2
+        default: v1.0.0-rc.3
         type: string
       previous_ref:
         description: Previous immutable Git tag to build for installer upgrade and backup rollback
         required: true
-        default: v1.0.0-rc.1
+        default: v1.0.0-rc.2
         type: string
 
 permissions:
@@ -233,5 +233,32 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'TokenResetsMonitor' } -MaxEvents 20 -ErrorAction SilentlyContinue | Format-List TimeCreated, Message
+          try {
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'TokenResetsMonitor' } -MaxEvents 20 -ErrorAction Stop | Format-List TimeCreated, Message
+          } catch {
+            Write-Host 'No TokenResetsMonitor Event Log entries are available.'
+          }
           exit 0
+
+  published-container:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.version }}
+    steps:
+      - name: Use an empty Docker credential directory
+        run: |
+          printf '%s\n' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
+          docker_config="$RUNNER_TEMP/trm-public-docker"
+          mkdir -p "$docker_config"
+          test ! -e "$docker_config/config.json"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Pull publicly and run both published architectures
+        run: |
+          image="ghcr.io/dkplugins/tokenresetsmonitor:$RELEASE_TAG"
+          for arch in amd64 arm64; do
+            docker pull --platform "linux/$arch" "$image"
+            docker run --rm --platform "linux/$arch" --read-only --network none "$image" version --json > version.json
+            jq -e --arg expected "${RELEASE_TAG#v}" '.version == $expected and .commit != "development"' version.json
+            docker run --rm --platform "linux/$arch" --read-only --network none --entrypoint sh "$image" -c 'test "$(id -u)" = 10001'
+          done
