@@ -2,6 +2,34 @@
 
 All notable changes are recorded here. This project follows [Semantic Versioning](https://semver.org/).
 
+## 1.2.0
+
+Stable release including the monitoring, setup, and observability features introduced in the 1.1 release candidates.
+
+### Added
+
+- Event history and per-destination explanations for baseline suppression, filter rejection, pending work, failure, cancellation, and acknowledged delivery.
+- Filter previews against retained real events without contacting notification destinations or modifying delivery queues.
+- Delivery history with attempt outcomes, cancellation reasons, retry deadlines, and live retry of a selected failed delivery.
+- Correction and withdrawal notifications with a comparison to the announcement previously acknowledged by that destination. Telegram and Slack enable change messages by default; webhooks explicitly opt in.
+- Configurable history-detail retention, keeping baseline and delivery identity markers to prevent replay; unlimited retention is the default.
+- Binary upgrade/backup rollback gates from both stable 1.0.0 and 1.1.0-rc.2 before publication, and published installer acceptance for both paths.
+
+### Fixed
+
+- Record acknowledgements against the exact payload sent when a source revision arrives during an in-flight request, preserving the next correction and its comparison.
+- Preserve complete provider-scan discoveries when a separate retraction-detail lookup fails.
+- Let a new correction or withdrawal supersede an obsolete failed change delivery without inheriting its terminal failure; retain the earlier attempt history.
+- Recognize Windows connection-refused errors when a crashed daemon leaves a stale local-control descriptor, allowing safe stopped access while retaining authentication-failure protection.
+- Refuse systemd smoke tests when retained data, logs, or a unit already exists, including dangling links, before registering cleanup or changing the installation.
+
+### Compatibility
+
+- Configuration schema 3 accepts existing schema 1 and 2 files without rewriting them. Saving a migration remains explicit.
+- State schema 3 migrates older supported databases with a consistent backup. Preserve the matching configuration/state backup when rolling back to 1.0 or a 1.1 candidate.
+- Standard webhook schema remains 1 with additive change-notification fields; existing ordinary notification IDs and pending work are preserved.
+- Old databases cannot reconstruct delivery attempts or historical filter decisions that earlier versions never recorded; history marks those gaps instead of inventing outcomes.
+
 ## 1.1.0-rc.2
 
 ### Fixed

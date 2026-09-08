@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
@@ -14,11 +15,13 @@ import (
 
 type Matcher func(model.Event) (bool, string)
 
-// Policy contains recipient fingerprints, never webhook URLs or credentials.
+// Policy contains recipient fingerprints and filter metadata, never credentials.
 type Policy struct {
-	Providers []string
-	Channels  map[string]string
-	Match     Matcher
+	Providers    []string
+	Channels     map[string]string
+	Changes      map[string]bool
+	FilterConfig json.RawMessage
+	Match        Matcher
 }
 
 type providerRecord struct {
@@ -29,12 +32,45 @@ type providerRecord struct {
 	RetryNotBefore *time.Time `json:"retry_not_before,omitempty"`
 }
 
+type Decision struct {
+	Matched      bool            `json:"matched"`
+	Reason       string          `json:"reason"`
+	ObservedAt   time.Time       `json:"observed_at"`
+	FilterConfig json.RawMessage `json:"filter_config,omitempty"`
+	Unavailable  bool            `json:"unavailable,omitempty"`
+}
+
+type Acknowledgment struct {
+	LegacyUnverified bool        `json:"legacy_unverified,omitempty"`
+	Destination      string      `json:"destination"`
+	NotificationID   string      `json:"notification_id"`
+	Event            model.Event `json:"event"`
+	At               time.Time   `json:"at"`
+}
+
 type EventRecord struct {
-	Event           model.Event       `json:"event"`
-	Baseline        bool              `json:"baseline"`
-	DetectedAt      time.Time         `json:"detected_at"`
-	AllowedChannels map[string]string `json:"allowed_channels"`
-	DeliveryIDs     map[string]string `json:"delivery_ids"`
+	NotificationStatus   string                    `json:"notification_status,omitempty"`
+	ChannelStatuses      map[string]string         `json:"channel_statuses,omitempty"`
+	NeedsDeliverySync    bool                      `json:"needs_delivery_sync,omitempty"`
+	DiscoveryChannels    map[string]string         `json:"discovery_channels,omitempty"`
+	DiscoveryUnavailable bool                      `json:"discovery_unavailable,omitempty"`
+	ChannelSuppressions  map[string]string         `json:"channel_suppressions,omitempty"`
+	Event                model.Event               `json:"event"`
+	Baseline             bool                      `json:"baseline"`
+	DetectedAt           time.Time                 `json:"detected_at"`
+	ObservedAt           time.Time                 `json:"observed_at"`
+	Decision             Decision                  `json:"decision"`
+	AllowedChannels      map[string]string         `json:"allowed_channels"`
+	DeliveryIDs          map[string]string         `json:"delivery_ids"`
+	Acknowledged         map[string]Acknowledgment `json:"acknowledged,omitempty"`
+	HistoryPrunedBefore  *time.Time                `json:"history_pruned_before,omitempty"`
+}
+
+type RevisionRecord struct {
+	Sequence   uint64      `json:"sequence"`
+	Event      model.Event `json:"event"`
+	Decision   Decision    `json:"decision"`
+	ObservedAt time.Time   `json:"observed_at"`
 }
 
 type Detection struct {
@@ -46,13 +82,26 @@ type Detection struct {
 
 func eventKey(provider, id string) string { return provider + "\x00" + id }
 
-// Reconcile runs before workers start. It cancels obsolete deliveries and
-// prevents enabling a channel or changing recipient from replaying old events.
+func normalizeRecord(record *EventRecord) {
+	if record.ChannelSuppressions == nil {
+		record.ChannelSuppressions = map[string]string{}
+	}
+	if record.AllowedChannels == nil {
+		record.AllowedChannels = map[string]string{}
+	}
+	if record.DeliveryIDs == nil {
+		record.DeliveryIDs = map[string]string{}
+	}
+	if record.Acknowledged == nil {
+		record.Acknowledged = map[string]Acknowledgment{}
+	}
+}
+
 func (s *Store) Reconcile(policy Policy) error {
 	if policy.Match == nil {
 		return errors.New("event matcher is required")
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		meta, providers, events, outbox := tx.Bucket([]byte("meta")), tx.Bucket([]byte("providers")), tx.Bucket([]byte("events")), tx.Bucket([]byte("outbox"))
 		var previous map[string]string
 		if _, err := getJSON(meta, "channels", &previous); err != nil {
@@ -93,10 +142,24 @@ func (s *Store) Reconcile(policy Policy) error {
 			if err := json.Unmarshal(v, &record); err != nil {
 				return err
 			}
+			normalizeRecord(&record)
 			for channel, fingerprint := range record.AllowedChannels {
 				if !active[record.Event.Provider.Slug] || policy.Channels[channel] == "" || policy.Channels[channel] != fingerprint || previous[channel] != fingerprint {
+					reason := "provider_not_selected"
+					if policy.Channels[channel] == "" {
+						reason = "channel_disabled"
+					} else if policy.Channels[channel] != fingerprint {
+						reason = "recipient_changed"
+					}
+					record.ChannelSuppressions[channel] = reason
 					delete(record.AllowedChannels, channel)
 				}
+			}
+			if record.NeedsDeliverySync {
+				if _, err := syncDeliveries(tx, &record, policy, time.Now()); err != nil {
+					return err
+				}
+				record.NeedsDeliverySync = false
 			}
 			return putJSON(events, string(k), record)
 		}); err != nil {
@@ -110,34 +173,85 @@ func (s *Store) Reconcile(policy Policy) error {
 			if delivery.Status != "pending" && delivery.Status != "failed" {
 				return nil
 			}
-			matches, _ := policy.Match(delivery.Notification.Event)
-			if !matches || !active[delivery.Notification.Event.Provider.Slug] || policy.Channels[delivery.Channel] != delivery.Destination {
-				delivery.Status = "canceled"
-				delivery.LastError = "configuration no longer permits delivery"
-				return putJSON(outbox, string(k), delivery)
+			reason := deliveryDisallowed(delivery, policy)
+			if reason == "" {
+				return nil
 			}
-			return nil
+			cancelDelivery(&delivery, reason, time.Now())
+			return putJSON(outbox, string(k), delivery)
 		}); err != nil {
 			return err
 		}
-		return putJSON(meta, "channels", policy.Channels)
+		if err := putJSON(meta, "channels", policy.Channels); err != nil {
+			return err
+		}
+		return putJSON(meta, "changes", policy.Changes)
 	})
+	if err == nil {
+		s.setPolicy(policy)
+	}
+	return err
 }
 
-// CommitScan must be called only after a complete, validated provider scan.
-// Event revisions and queue entries are committed in the same transaction.
+func deliveryDisallowed(delivery Delivery, policy Policy) string {
+	if policy.Channels[delivery.Channel] == "" {
+		return "channel_disabled"
+	}
+	if policy.Channels[delivery.Channel] != delivery.Destination {
+		return "recipient_changed"
+	}
+	if delivery.Notification.Kind != "" {
+		if !policy.Changes[delivery.Channel] {
+			return "changes_disabled"
+		}
+		return ""
+	}
+	if policy.Match == nil {
+		return "filter_unavailable"
+	}
+	matched, reason := policy.Match(delivery.Notification.Event)
+	if !matched {
+		return reason
+	}
+	for _, provider := range policy.Providers {
+		if provider == delivery.Notification.Event.Provider.Slug {
+			return ""
+		}
+	}
+	return "provider_not_selected"
+}
+
+func cancelDelivery(delivery *Delivery, reason string, now time.Time) {
+	delivery.Status = "canceled"
+	delivery.CancellationReason = reason
+	delivery.CanceledAt = timePointer(now)
+	// Preserve the last network failure separately from cancellation evidence.
+}
+
 func (s *Store) CommitScan(slug string, incoming []model.Event, policy Policy, now time.Time) ([]Detection, error) {
+	return s.commitEvents(slug, incoming, policy, now, false)
+}
+
+// CommitDetails records verified details without initializing or refreshing a provider baseline.
+func (s *Store) CommitDetails(slug string, incoming []model.Event, policy Policy, now time.Time) ([]Detection, error) {
+	return s.commitEvents(slug, incoming, policy, now, true)
+}
+
+func (s *Store) commitEvents(slug string, incoming []model.Event, policy Policy, now time.Time, details bool) ([]Detection, error) {
+	if policy.Match == nil {
+		return nil, errors.New("event matcher is required")
+	}
 	var detections []Detection
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		providers, events, outbox := tx.Bucket([]byte("providers")), tx.Bucket([]byte("events")), tx.Bucket([]byte("outbox"))
+		providers, events := tx.Bucket([]byte("providers")), tx.Bucket([]byte("events"))
 		var provider providerRecord
 		if _, err := getJSON(providers, slug, &provider); err != nil {
 			return err
 		}
-		if !provider.Active {
+		if !details && !provider.Active {
 			return errors.New("provider is not active")
 		}
-		initial := !provider.Ready
+		initial := !details && !provider.Ready
 		seen := map[string]bool{}
 		for _, event := range incoming {
 			if event.ID == "" || event.Provider.Slug != slug || event.Revision < 1 {
@@ -153,78 +267,59 @@ func (s *Store) CommitScan(slug string, incoming []model.Event, policy Policy, n
 			if err != nil {
 				return err
 			}
+			if details && !exists {
+				continue
+			}
 			if exists && event.Revision < record.Event.Revision {
 				if !initial {
 					detections = append(detections, Detection{EventID: event.ID, Revision: event.Revision, Reason: "stale_revision"})
 					continue
 				}
-				// Reenabling still establishes a baseline from the newest known
-				// payload instead of overwriting it with an outdated replica.
 				event = record.Event
 			}
 			if exists && !initial && sameEvent(record.Event, event) {
 				continue
 			}
 			if !exists {
-				record = EventRecord{Baseline: initial, DetectedAt: now.UTC(), AllowedChannels: map[string]string{}, DeliveryIDs: map[string]string{}}
+				record = EventRecord{Baseline: initial, DetectedAt: now.UTC(), DiscoveryChannels: map[string]string{}}
+				for channel, recipient := range policy.Channels {
+					record.DiscoveryChannels[channel] = recipient
+				}
+				normalizeRecord(&record)
 				if !initial {
 					for channel, recipient := range policy.Channels {
 						record.AllowedChannels[channel] = recipient
 					}
 				}
 			}
+			normalizeRecord(&record)
 			if initial {
 				record.Baseline = true
 				record.AllowedChannels = map[string]string{}
 			}
-			if record.DeliveryIDs == nil {
-				record.DeliveryIDs = map[string]string{}
-			}
 			record.Event = event
+			record.ObservedAt = now.UTC()
 			matched, reason := policy.Match(event)
-			detection := Detection{EventID: event.ID, Revision: event.Revision, Reason: reason}
-			for channel, id := range record.DeliveryIDs {
-				var delivery Delivery
-				found, err := getJSON(outbox, id, &delivery)
-				if err != nil {
-					return err
-				}
-				if !found {
-					return fmt.Errorf("event references missing delivery for %s", channel)
-				}
-				if delivery.Status != "pending" && delivery.Status != "failed" {
-					continue
-				}
-				delivery.Notification.Event = event
-				if !matched || record.Baseline || record.AllowedChannels[channel] != policy.Channels[channel] || policy.Channels[channel] == "" {
-					delivery.Status = "canceled"
-					delivery.LastError = "event no longer permits delivery"
-				}
-				if err := putJSON(outbox, id, delivery); err != nil {
-					return err
-				}
+			if record.Baseline {
+				reason = "initial_history"
 			}
-			if !record.Baseline && matched {
-				for channel, destination := range record.AllowedChannels {
-					if destination == "" || policy.Channels[channel] != destination || record.DeliveryIDs[channel] != "" {
-						continue
-					}
-					sum := sha256.Sum256([]byte(key + "\x00" + channel + "\x00" + destination))
-					id := hex.EncodeToString(sum[:])
-					delivery := Delivery{Channel: channel, Destination: destination, Status: "pending", NextAttempt: now.UTC(), Notification: model.Notification{SchemaVersion: 1, ID: id, DetectedAt: record.DetectedAt, Event: event}}
-					if err := putJSON(outbox, id, delivery); err != nil {
-						return err
-					}
-					record.DeliveryIDs[channel] = id
-					detection.Queued++
-				}
+			record.Decision = Decision{Matched: matched, Reason: reason, ObservedAt: now.UTC(), FilterConfig: append(json.RawMessage(nil), policy.FilterConfig...)}
+			queued, err := syncDeliveries(tx, &record, policy, now)
+			if err != nil {
+				return err
+			}
+			if err := appendRevision(tx, record); err != nil {
+				return err
 			}
 			if err := putJSON(events, key, record); err != nil {
 				return err
 			}
 			if !initial {
-				detections = append(detections, detection)
+				detections = append(detections, Detection{event.ID, event.Revision, queued, reason})
 			}
+		}
+		if details {
+			return nil
 		}
 		provider.Ready = true
 		provider.LastSuccess = timePointer(now)
@@ -236,6 +331,154 @@ func (s *Store) CommitScan(slug string, incoming []model.Event, policy Policy, n
 		return nil, err
 	}
 	return detections, nil
+}
+
+func appendRevision(tx *bolt.Tx, record EventRecord) error {
+	bucket := tx.Bucket([]byte("revisions"))
+	seq, err := bucket.NextSequence()
+	if err != nil {
+		return err
+	}
+	revision := RevisionRecord{seq, record.Event, record.Decision, record.ObservedAt}
+	key := fmt.Sprintf("%s\x00%020d", eventKey(record.Event.Provider.Slug, record.Event.ID), seq)
+	return putJSON(bucket, key, revision)
+}
+
+func syncDeliveries(tx *bolt.Tx, record *EventRecord, policy Policy, now time.Time) (int, error) {
+	normalizeRecord(record)
+	channels := map[string]bool{}
+	for channel := range policy.Channels {
+		channels[channel] = true
+	}
+	for channel := range record.DeliveryIDs {
+		channels[channel] = true
+	}
+	queued := 0
+	for channel := range channels {
+		count, err := syncChannel(tx, record, channel, policy, now)
+		if err != nil {
+			return 0, err
+		}
+		queued += count
+	}
+	return queued, nil
+}
+
+func syncChannel(tx *bolt.Tx, record *EventRecord, channel string, policy Policy, now time.Time) (int, error) {
+	outbox := tx.Bucket([]byte("outbox"))
+	var current Delivery
+	previousID := record.DeliveryIDs[channel]
+	if previousID != "" {
+		found, err := getJSON(outbox, previousID, &current)
+		if err != nil {
+			return 0, err
+		}
+		if !found {
+			return 0, fmt.Errorf("event references missing delivery for %s", channel)
+		}
+	}
+	destination := policy.Channels[channel]
+	ack, acknowledged := record.Acknowledged[channel]
+	notification := model.Notification{SchemaVersion: 1, DetectedAt: record.DetectedAt, Event: record.Event}
+	reason := ""
+	if acknowledged {
+		switch {
+		case destination == "":
+			reason = "channel_disabled"
+		case destination != ack.Destination:
+			reason = "recipient_changed"
+		case !policy.Changes[channel]:
+			reason = "changes_disabled"
+		default:
+			changes := model.MeaningfulChanges(ack.Event, record.Event)
+			if len(changes) == 0 {
+				reason = "no_meaningful_change"
+				break
+			}
+			notification.Kind = "correction"
+			if record.Event.Status == "retracted" && ack.Event.Status != "retracted" {
+				notification.Kind = "retraction"
+			}
+			notification.SchemaVersion = 1
+			previous := ack.Event
+			notification.PreviousEvent = &previous
+			notification.PreviousEventUnverified = ack.LegacyUnverified
+			notification.Changes = changes
+			notification.RelatedNotificationID = ack.NotificationID
+			notification.DetectedAt = record.ObservedAt
+		}
+	} else {
+		matched, matchReason := policy.Match(record.Event)
+		switch {
+		case record.Baseline:
+			reason = "initial_history"
+		case destination == "":
+			reason = "channel_disabled"
+		case record.AllowedChannels[channel] != destination:
+			reason = "recipient_not_eligible_at_discovery"
+		case !matched:
+			reason = matchReason
+		}
+	}
+	wasFailed, previousFailure := current.Status == "failed", current.LastError
+	active := current.Status == "pending" || current.Status == "failed"
+	if reason != "" {
+		if active {
+			cancelDelivery(&current, reason, now)
+			if err := putJSON(outbox, previousID, current); err != nil {
+				return 0, err
+			}
+		}
+		return 0, nil
+	}
+	if current.AttemptID != "" {
+		// The sender owns an immutable claim. Its outcome determines whether a
+		// replacement is an initial announcement or a correction.
+		if active && !equivalentNotification(current.Notification, notification) {
+			cancelDelivery(&current, "superseded", now)
+			if err := putJSON(outbox, previousID, current); err != nil {
+				return 0, err
+			}
+		}
+		return 0, nil
+	}
+	if active && current.Destination == destination && equivalentNotification(current.Notification, notification) {
+		return 0, nil
+	}
+	if active {
+		cancelDelivery(&current, "superseded", now)
+		if err := putJSON(outbox, previousID, current); err != nil {
+			return 0, err
+		}
+	}
+	key := eventKey(record.Event.Provider.Slug, record.Event.ID)
+	identity := key + "\x00" + channel + "\x00" + destination
+	if previousID != "" || notification.Kind != "" {
+		raw, _ := json.Marshal(notification)
+		identity += "\x00" + previousID + "\x00" + string(raw)
+	}
+	sum := sha256.Sum256([]byte(identity))
+	notification.ID = hex.EncodeToString(sum[:])
+	delivery := Delivery{Channel: channel, Destination: destination, Status: "pending", Notification: notification, NextAttempt: now.UTC(), CreatedAt: now.UTC()}
+	if wasFailed && notification.Kind == "" {
+		delivery.Status = "failed"
+		delivery.LastError = previousFailure
+	}
+	if err := putJSON(outbox, notification.ID, delivery); err != nil {
+		return 0, err
+	}
+	record.DeliveryIDs[channel] = notification.ID
+	return 1, nil
+}
+
+func equivalentNotification(a, b model.Notification) bool {
+	if a.Kind != b.Kind || a.RelatedNotificationID != b.RelatedNotificationID {
+		return false
+	}
+	if a.Kind == "" {
+		return sameEvent(a.Event, b.Event)
+	}
+	return len(model.MeaningfulChanges(a.Event, b.Event)) == 0
 }
 
 func sameEvent(a, b model.Event) bool {
@@ -262,8 +505,6 @@ func (s *Store) MarkProviderError(slug, message string, retryNotBefore time.Time
 	})
 }
 
-// ProviderPollState exposes the persisted upstream cooldown and recovery state
-// without exposing event history or requiring an HTTP call.
 func (s *Store) ProviderPollState(slug string) (notBefore time.Time, recovering bool, err error) {
 	err = s.db.View(func(tx *bolt.Tx) error {
 		var p providerRecord
@@ -279,31 +520,98 @@ func (s *Store) ProviderPollState(slug string) (notBefore time.Time, recovering 
 	return
 }
 
-// MissingPending returns disappeared records that still have queued deliveries.
-// A missing listing entry alone does not cancel anything; the caller must verify
-// an explicit retraction through the event detail endpoint.
 func (s *Store) MissingPending(slug string, incoming []model.Event) ([]model.Event, error) {
+	return s.MissingTracked(slug, incoming)
+}
+
+// MissingTracked includes pending work and announcements acknowledged by a
+// currently enabled correction recipient. A missing list item is never withdrawal.
+func (s *Store) MissingTracked(slug string, incoming []model.Event) ([]model.Event, error) {
 	seen := map[string]bool{}
 	for _, event := range incoming {
 		seen[event.ID] = true
 	}
 	var missing []model.Event
 	err := s.db.View(func(tx *bolt.Tx) error {
-		found := map[string]bool{}
-		return tx.Bucket([]byte("outbox")).ForEach(func(_, v []byte) error {
-			var d Delivery
-			if err := json.Unmarshal(v, &d); err != nil {
+		var channels map[string]string
+		var changes map[string]bool
+		var cursor string
+		meta := tx.Bucket([]byte("meta"))
+		if _, err := getJSON(meta, "channels", &channels); err != nil {
+			return err
+		}
+		if _, err := getJSON(meta, "changes", &changes); err != nil {
+			return err
+		}
+		if _, err := getJSON(meta, "detail_cursor:"+slug, &cursor); err != nil {
+			return err
+		}
+		if err := tx.Bucket([]byte("events")).ForEach(func(_, v []byte) error {
+			var record EventRecord
+			if err := json.Unmarshal(v, &record); err != nil {
 				return err
 			}
-			e := d.Notification.Event
-			if e.Provider.Slug == slug && !seen[e.ID] && !found[e.ID] && (d.Status == "pending" || d.Status == "failed") {
-				found[e.ID] = true
-				missing = append(missing, e)
+			if record.Event.Provider.Slug != slug || seen[record.Event.ID] {
+				return nil
+			}
+			tracked := false
+			for channel, ack := range record.Acknowledged {
+				if changes[channel] && channels[channel] != "" && channels[channel] == ack.Destination && ack.Event.Status != "retracted" {
+					tracked = true
+				}
+			}
+			for _, id := range record.DeliveryIDs {
+				var delivery Delivery
+				if _, err := getJSON(tx.Bucket([]byte("outbox")), id, &delivery); err != nil {
+					return err
+				}
+				if delivery.Status == "pending" || delivery.Status == "failed" || delivery.AttemptID != "" {
+					tracked = true
+				}
+			}
+			if tracked {
+				missing = append(missing, record.Event)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		sort.Slice(missing, func(i, j int) bool { return missing[i].ID < missing[j].ID })
+		split := sort.Search(len(missing), func(i int) bool { return missing[i].ID > cursor })
+		if split < len(missing) {
+			missing = append(append([]model.Event(nil), missing[split:]...), missing[:split]...)
+		}
+		return nil
+	})
+	return missing, err
+}
+
+func (s *Store) AdvanceDetailCursor(slug, id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error { return putJSON(tx.Bucket([]byte("meta")), "detail_cursor:"+slug, id) })
+}
+
+func (s *Store) TrackedProviders(policy Policy) ([]string, error) {
+	unique := map[string]bool{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte("events")).ForEach(func(_, v []byte) error {
+			var record EventRecord
+			if err := json.Unmarshal(v, &record); err != nil {
+				return err
+			}
+			for channel, ack := range record.Acknowledged {
+				if policy.Changes[channel] && policy.Channels[channel] != "" && policy.Channels[channel] == ack.Destination && ack.Event.Status != "retracted" {
+					unique[record.Event.Provider.Slug] = true
+				}
 			}
 			return nil
 		})
 	})
-	return missing, err
+	providers := make([]string, 0, len(unique))
+	for provider := range unique {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers, err
 }
 
 func (s *Store) Status(running bool, now time.Time) (model.Status, error) {

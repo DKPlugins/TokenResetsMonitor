@@ -83,7 +83,7 @@ func TestSaveChannelPreservesUnrelatedReferencesAndConcurrentEdits(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"# user comment", "config_version: 2", "${PRIVATE_WEBHOOK}", "${BOT_TOKEN}", "${SLACK_SECRET}"} {
+	for _, expected := range []string{"# user comment", "config_version: 3", "${PRIVATE_WEBHOOK}", "${BOT_TOKEN}", "${SLACK_SECRET}"} {
 		if !bytes.Contains(current, []byte(expected)) {
 			t.Fatalf("lost %s", expected)
 		}

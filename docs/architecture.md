@@ -1,6 +1,6 @@
 # Architecture and compatibility contracts
 
-TokenResetsMonitor reads public announcements and sends notifications. It has no web UI or personal-account access. An optional local HTTP server exposes operational metrics and health; project release checks never install updates.
+TokenResetsMonitor reads public announcements and sends notifications. It has no web UI or personal-account access. The CLI manages history and deliveries through private local control when the daemon is running. A separate optional local HTTP server exposes operational metrics and health; project release checks never install updates.
 
 ```mermaid
 flowchart LR
@@ -27,11 +27,13 @@ The selected provider endpoints are scanned to completion. Each request URL has 
 
 The state database contains versioned metadata, provider initialization state, event snapshots/revisions, HTTP cache entries, and per-channel deliveries. A transaction records observed events and new queue items together. Baselines are committed only after a full successful provider scan. Events from that baseline remain suppressed; configuration edits do not turn the initial history into a backlog.
 
-Pending deliveries are reconciled against current recipients and filters at startup and at accepted operational reloads. Credentials do not define recipient identity. Source revisions can change eligibility for a post-baseline event, but an already acknowledged notification is not resent as a second reset. List disappearance is insufficient evidence of withdrawal.
+Pending deliveries are reconciled against current recipients and filters at startup and at accepted operational reloads. Credentials do not define recipient identity. Source revisions can change eligibility for a post-baseline event. A meaningful correction or explicit retraction of an acknowledged announcement produces a separate change notification for the same destination when its `notify_changes` option permits it. Comparisons use the destination's last acknowledged event snapshot. List disappearance is insufficient evidence of withdrawal; the monitor checks the source event's explicit status.
 
-Opening a database takes an exclusive process lock with a bounded timeout. Status and diagnostic commands read a separately published JSON snapshot, avoiding the database's write lock. Store the database on a local disk and mount the same persistent volume across container replacements.
+Opening a database for monitoring takes an exclusive process lock with a bounded timeout. Status and diagnostic commands read a separately published JSON snapshot. History and delivery commands use the daemon's authenticated local control endpoint; stopped reads use a read-only store. The protected control descriptor is separate from the public operational snapshot and is never exported. Store the database on a local disk and mount the same persistent volume across container replacements.
 
-The queue provides at-least-once delivery around crashes, not exactly-once delivery at the recipient. One failed channel does not block the other. HTTP `2xx` acknowledges a webhook; Telegram additionally requires `ok: true`, and Slack requires HTTP 200 with an `ok` response. Retriable attempts use exponential backoff and honor `Retry-After`. Rate limits persist a cooldown for the complete destination, preventing a queue burst from bypassing the limit. An explicit command requeues eligible permanent failures after the process is stopped.
+The queue provides at-least-once delivery around crashes, not exactly-once delivery at the recipient. One failed channel does not block the other. HTTP `2xx` acknowledges a webhook; Telegram additionally requires `ok: true`, and Slack requires HTTP 200 with an `ok` response. Retriable attempts use exponential backoff and honor `Retry-After`. Rate limits persist a cooldown for the complete destination, preventing a queue burst from bypassing the limit. Live or stopped commands requeue eligible permanent failures without changing their notification identity or bypassing destination cooldowns.
+
+State schema 3 retains observation decisions, delivery outcomes, attempt history, and the acknowledged revision per destination. Retention can prune old detailed records while preserving replay-suppression and acknowledgement markers. Legacy records explicitly identify missing historical detail. Filter previews share the monitor's matcher but never mutate state or call a sender. See [history and delivery management](history.md).
 
 ## Webhook contract
 
@@ -44,6 +46,11 @@ The default body is JSON with `schema_version: 1`. The top-level contract is:
 | `detected_at` | UTC timestamp when the monitor observed the event |
 | `test` | `true` for a synthetic manual delivery check |
 | `event` | Source event with ID, revision, provider, type, status, dates, scope, confidence, and links |
+| `kind` | Optional change type: `correction` or `retraction`; absent for ordinary announcements |
+| `previous_event` | Optional snapshot previously acknowledged by this destination |
+| `changes` | Optional field comparisons between the previous and current announcement |
+| `related_notification_id` | Optional ID of the prior acknowledged notification |
+| `previous_event_unverified` | Optional `true` when legacy storage cannot prove the exact previously acknowledged snapshot |
 
 Within `event`, `provider.slug` identifies the source provider and `event_type` retains its original meaning. `announced_at`, `published_at`, `effective_at`, and optional scheduled/observed dates describe different points in time. Nullable timestamps and empty `scope.products`, `scope.plans`, or `scope.windows` arrays preserve missing source evidence. The source's evidence field is `scope.scope_evidence`. `confidence.label` is the category used for filtering; its score is informational. `links.html` points to the public source entry.
 
@@ -51,7 +58,7 @@ Receivers should tolerate additional object fields, persist accepted notificatio
 
 ## Version boundaries
 
-The application uses SemVer. Version 1.1 writes configuration (`config_version`) 2 and bbolt metadata (`state_schema_version`) 2; webhook JSON (`schema_version`) remains 1. Version 1 configurations are normalized in memory; saving a migration is explicit. Supported old databases migrate after a backup. These versions evolve independently. Additive optional webhook fields are compatible within the same schema; changing existing meaning or removing fields requires an explicit incompatible schema transition and an application major release.
+The application uses SemVer. Version 1.2 writes configuration (`config_version`) 3 and bbolt metadata (`state_schema_version`) 3; webhook JSON (`schema_version`) remains 1. Version 1 and 2 configurations are normalized in memory; saving a migration is explicit. Supported old databases migrate after a backup. These versions evolve independently. Additive optional webhook fields are compatible within the same schema; changing existing meaning or removing fields requires an explicit incompatible schema transition and an application major release. Webhook change deliveries require explicit opt-in; ordinary announcement fields and identities retain their meaning.
 
 Known old database schemas migrate transactionally after a backup. Newer unsupported schemas are refused. Configuration migration is an explicit preview/apply command and preserves the original bytes in a sibling backup. Schema zero represents the early unversioned layout; it is supported for migration testing, not a separate published stable release.
 

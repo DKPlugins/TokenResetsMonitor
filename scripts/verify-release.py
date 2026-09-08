@@ -37,7 +37,7 @@ def verify(root):
     required = {"README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
                 "config.example.yaml", "compose.yaml", "compatibility.json",
                 "install.sh", "install.ps1", "tokenresetsmonitor.service",
-                "docs/architecture.md", "docs/upgrading.md", "docs/observability.md",
+                "docs/architecture.md", "docs/upgrading.md", "docs/observability.md", "docs/history.md",
                 "docs/examples/prometheus.yml", "docs/examples/alerts.yml", "docs/examples/alerts.test.yml"}
     payloads = {archive.name for archive in archives} | {"install.sh", "install.ps1", "compatibility.json"}
     if not payloads.issubset(seen):

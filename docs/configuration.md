@@ -4,23 +4,26 @@ See [config.example.yaml](../config.example.yaml) for a complete file. Precedenc
 
 | Setting | Default / behavior |
 | --- | --- |
-| `config_version` | `2`; version 1 files are accepted and normalized in memory |
+| `config_version` | `3`; version 1 and 2 files are accepted and normalized in memory |
 | `api_base_url` | `https://tokenresets.com/api/v1` |
 | `poll_interval` | `30m`; minimum `1m` |
 | `request_timeout` | `30s`; per API request |
 | `state_path` | `state.db` under the default user configuration directory; installer/example overrides differ |
+| `history.retention_days` | `0`; retain detailed history indefinitely; positive values prune old detail while preserving no-replay markers |
 | `providers` | Explicit `openai-codex` and `anthropic-claude` entries |
 | `providers[].plans/products/windows` | Empty lists accept all known or unknown values in that dimension |
 | `event_types` | `[hard_reset]` |
 | `minimum_confidence` | `reported` |
 | `unknown_scope` | `include`; use `exclude` to reject unknown values in a dimension you filter |
 | `webhook.enabled` | `false` |
+| `webhook.notify_changes` | `false`; explicitly opt in to correction and withdrawal deliveries |
 | `webhook.url` | Destination HTTP(S) URL; required when enabled or explicitly tested |
 | `webhook.method` | `POST` |
 | `webhook.headers` | Header-name/value mapping; empty by default |
 | `webhook.body_template` | Empty sends the standard JSON notification |
 | `webhook.timeout` | `15s` |
 | `telegram.enabled` | `false` |
+| `telegram.notify_changes` | `true`; notify this destination about relevant corrections and withdrawals |
 | `telegram.bot_token`, `telegram.chat_id` | Required when enabled or explicitly tested |
 | `telegram.message_thread_id` | `0`, meaning no topic selection |
 | `telegram.disable_notification` | `false`; set `true` for silent delivery |
@@ -50,13 +53,14 @@ tokenresetsmonitor run --config ./config.yaml --log-level debug
 
 Collections are parsed as YAML and replace the corresponding list or map rather than merging it; for example, `TRM_WEBHOOK_HEADERS='{}'` removes all configured custom headers. Unknown provider-filter keys are rejected. Any parsed string can contain `${NAME}` references; an unset referenced variable is an error. For example, `Authorization: "Bearer ${WEBHOOK_TOKEN}"` keeps the secret outside your YAML. The wizard preserves references. `init --defaults` saves effective nonsecret overrides, while webhook URL/template and Telegram token/chat ID overrides are saved as `${TRM_...}` references. `TRM_WEBHOOK_HEADERS` is a runtime override and is not saved. Keep these secret environment variables available to the actual service/container after initialization.
 
-The `config_version` field is required. Version 1 files remain readable without being rewritten. Use `config migrate` to preview and explicitly save version 2. Unversioned files require explicit migration; future unknown versions are refused. API base URLs must not contain a query or fragment, and all configured HTTP URLs must omit embedded username/password credentials. Supply webhook authentication through headers or supported query parameters instead.
+The `config_version` field is required. Version 1 and 2 files remain readable without being rewritten. Use `config migrate` to preview and explicitly save version 3. Unversioned files require explicit migration; future unknown versions are refused. API base URLs must not contain a query or fragment, and all configured HTTP URLs must omit embedded username/password credentials. Supply webhook authentication through headers or supported query parameters instead.
 
 ## Added settings
 
 | Setting | Default / behavior |
 | --- | --- |
 | `slack.enabled` | `false` |
+| `slack.notify_changes` | `true`; notify this destination about relevant corrections and withdrawals |
 | `slack.webhook_url` | HTTPS incoming webhook; treated as a secret |
 | `slack.timeout` | `15s` |
 | `reload.enabled` | `true`; watch the configuration for operational changes |
@@ -72,7 +76,7 @@ All settings also accept their corresponding `TRM_...` environment overrides, fo
 
 The daemon checks for changes automatically, validates the complete effective configuration, waits for current requests to finish, reconciles pending work, and switches generations together. A partially written YAML file, unknown field, missing secret, invalid destination, or restart-only change leaves the last valid generation active. Saving the corrected file allows a later retry. Status exposes the generation, last reload result, and whether draining is in progress.
 
-Reloadable settings include providers/filters, poll and request timeouts, channel enablement and destination credentials/options, log level, and update-check preferences. Provider additions and newly enabled channels establish baselines; changing settings never replays old unchanged events. Queue entries for disabled or changed recipients are canceled; rotating Telegram credentials for the same chat/topic retains pending identity. A Slack incoming webhook URL identifies its destination, so changing it cancels the old queue.
+Reloadable settings include providers/filters, poll and request timeouts, channel enablement and destination credentials/options, history retention, log level, and update-check preferences. Provider additions and newly enabled channels establish baselines; changing settings never replays old unchanged events. Queue entries for disabled or changed recipients are canceled; rotating Telegram credentials for the same chat/topic retains pending identity. A Slack incoming webhook URL identifies its destination, so changing it cancels the old queue.
 
 These fields require restart: `state_path`, `api_base_url`, `observability.*`, and logging fields other than `logging.level`. A reload containing any such change is rejected as a whole. Re-enabling reload after `reload.enabled: false` requires restarting the daemon.
 
@@ -82,7 +86,7 @@ For Docker, mount a configuration directory, not a single file, so atomic editor
 
 ## Version and storage boundaries
 
-New files use configuration schema 2. State schema 2 adds durable channel cooldowns and migrates existing supported state with a backup. The standard webhook payload remains schema 1. An older 1.0 binary cannot read state schema 2: rollback requires its matching stopped backup. See [upgrading.md](upgrading.md).
+New files use configuration schema 3. State schema 3 stores delivery history and revision-aware notifications and migrates supported older state with a backup. The standard webhook payload remains schema 1. A 1.0 or 1.1 binary cannot read state schema 3: rollback requires its matching stopped backup. See [upgrading.md](upgrading.md).
 
 ## Custom webhook templates
 

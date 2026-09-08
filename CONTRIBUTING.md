@@ -11,9 +11,12 @@ gofmt -w cmd internal
 go test -race ./...
 go vet ./...
 go build ./cmd/tokenresetsmonitor
+python scripts/test-upgrade.py
 ```
 
 The race detector requires a supported C compiler, including on Windows. Normal release binaries are built with `CGO_ENABLED=0`.
+
+The binary upgrade check requires Python 3.12+ and local tags `v1.0.0` and `v1.1.0-rc.2`. It builds those exact Git sources in temporary directories and verifies migration, pending delivery identity, and restored-backup rollback against the checkout. It does not install a service or use your runtime state. Use `--previous TAG` to select one prior version.
 
 Use `httptest` and synthetic fixtures for API/webhook/Telegram/Slack/update tests. CI must not need real accounts or contact user destinations. Tests should protect behavior: complete pagination, baseline suppression, independent retries, migration integrity, secret redaction, reload boundaries, liveness/readiness, and rate-limit fairness. Add tests for a reproduced defect or a new public behavior, not snapshots of implementation details.
 

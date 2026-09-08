@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -71,7 +72,9 @@ func retryDeadline(err error, now time.Time) time.Time {
 func (m *monitor) poll(ctx context.Context) error {
 	cycle := m.cycles.Add(1)
 	var failures error
+	selected := make(map[string]bool)
 	for _, slug := range m.policy.Providers {
+		selected[slug] = true
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -84,83 +87,134 @@ func (m *monitor) poll(ctx context.Context) error {
 			continue
 		}
 		started := time.Now()
-		scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		scanCtx = api.WithScanBudget(scanCtx)
+		budget := api.WithScanBudget(ctx)
+		scanCtx, cancel := context.WithTimeout(budget, 5*time.Minute)
 		events, sourceErr := m.source.Events(scanCtx, slug)
-		var detailNotBefore time.Time
-		if sourceErr == nil {
-			missing, err := m.store.MissingPending(slug, events)
-			if err != nil {
-				cancel()
-				return err
-			}
-			for _, old := range missing {
-				detail, err := m.source.Event(scanCtx, old.ID)
-				if err != nil {
-					if errors.Is(err, api.ErrScanBudget) {
-						sourceErr = err
-						break
-					}
-					detailNotBefore = retryDeadline(err, m.now())
-					if scanCtx.Err() != nil || !detailNotBefore.IsZero() {
-						break
-					}
-					continue
-				}
-				if detail.ID == old.ID && detail.Provider.Slug == slug && detail.Status == "retracted" {
-					events = append(events, detail)
-				}
-			}
-		}
 		if scanCtx.Err() != nil {
 			sourceErr = scanCtx.Err()
 		}
 		cancel()
-		// Quiescing a generation must never commit its interrupted scan.
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if sourceErr != nil {
-			notBefore = retryDeadline(sourceErr, m.now())
-			if err := m.store.MarkProviderError(slug, "Provider scan failed; see program logs", notBefore); err != nil {
+			if err := m.store.MarkProviderError(slug, "Provider scan failed; see program logs", retryDeadline(sourceErr, m.now())); err != nil {
 				return err
 			}
 			m.metrics.ObserveScan(slug, time.Since(started), false)
 			m.logger.Warn("Provider scan failed", "cycle_id", cycle, "provider", slug, "error", safeSourceError(sourceErr))
-			if !notBefore.IsZero() {
-				m.logger.Warn("Provider polling paused by upstream Retry-After", "cycle_id", cycle, "provider", slug, "retry_at", notBefore, "delay", notBefore.Sub(m.now()))
+			if until := retryDeadline(sourceErr, m.now()); !until.IsZero() {
+				m.logger.Warn("Provider polling paused by upstream Retry-After", "cycle_id", cycle, "provider", slug, "retry_at", until, "delay", until.Sub(m.now()))
 			}
 			failures = errors.Join(failures, fmt.Errorf("provider %s scan failed", slug))
 			continue
 		}
+		// A completed listing is committed independently of optional detail
+		// verification. Slow or unavailable old records cannot erase fresh work.
 		detections, err := m.store.CommitScan(slug, events, m.policy, m.now())
 		if err != nil {
 			return fmt.Errorf("provider %s scan could not be committed: %w", slug, err)
 		}
-		if !detailNotBefore.IsZero() {
-			if err := m.store.MarkProviderError(slug, "Event detail verification deferred by upstream Retry-After", detailNotBefore); err != nil {
+		m.logDetections(cycle, slug, detections)
+		if err := m.verifyDetails(budget, cycle, slug, events); err != nil {
+			if !recoverablePoll(err) {
 				return err
 			}
-			m.logger.Warn("Provider polling paused by upstream Retry-After", "cycle_id", cycle, "provider", slug, "retry_at", detailNotBefore, "delay", detailNotBefore.Sub(m.now()))
+			failures = errors.Join(failures, err)
 		}
-		for _, d := range detections {
-			if d.Reason == "stale_revision" {
-				m.logger.Warn("Ignored older event revision", "provider", slug, "event_id", d.EventID, "reason", d.Reason)
-				continue
-			}
-			m.logger.Info("Event discovered or revised", "cycle_id", cycle, "provider", slug, "event_id", d.EventID, "revision", d.Revision, "queued", d.Queued)
-			if d.Queued == 0 {
-				m.logger.Debug("Event produced no new notification", "provider", slug, "event_id", d.EventID, "reason", d.Reason)
-			}
+		m.metrics.ObserveScan(slug, time.Since(started), true)
+		m.logger.Info("Provider scan completed", "cycle_id", cycle, "provider", slug, "events", len(events), "duration", time.Since(started), "recovered", recovering)
+	}
+	// Removing a provider filter must not hide corrections to announcements
+	// already accepted by a still-active destination.
+	tracked, err := m.store.TrackedProviders(m.policy)
+	if err != nil {
+		return err
+	}
+	for _, slug := range tracked {
+		if selected[slug] {
+			continue
 		}
-		m.metrics.ObserveScan(slug, time.Since(started), detailNotBefore.IsZero())
-		m.logger.Info("Provider scan completed", "cycle_id", cycle, "provider", slug, "events", len(events), "duration", time.Since(started), "recovered", recovering && detailNotBefore.IsZero())
+		if err := m.verifyDetails(api.WithScanBudget(ctx), cycle, slug, nil); err != nil {
+			if !recoverablePoll(err) {
+				return err
+			}
+			failures = errors.Join(failures, err)
+		}
 	}
 	if err := m.store.PublishStatus(true, time.Now()); err != nil {
 		return errors.Join(failures, err)
 	}
 	if failures != nil {
 		return sourceFailures{failures}
+	}
+	return nil
+}
+
+func (m *monitor) logDetections(cycle uint64, slug string, detections []state.Detection) {
+	for _, d := range detections {
+		m.logger.Debug("Event observation recorded", "cycle_id", cycle, "provider", slug, "event_id", d.EventID, "revision", d.Revision, "queued", d.Queued, "reason", d.Reason)
+	}
+}
+
+// verifyDetails advances after each lookup, including failed lookups, so a
+// missing or oversized record cannot starve the rest of the tracked history.
+func (m *monitor) verifyDetails(ctx context.Context, cycle uint64, slug string, events []model.Event) error {
+	notBefore, _, err := m.store.ProviderPollState(slug)
+	if err != nil {
+		return err
+	}
+	if m.now().Before(notBefore) {
+		return nil
+	}
+	missing, err := m.store.MissingTracked(slug, events)
+	if err != nil {
+		return err
+	}
+	detailCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	var unavailable bool
+	var budgetFailure bool
+	for i, old := range missing {
+		if i >= 32 || detailCtx.Err() != nil {
+			break
+		}
+		detail, sourceErr := m.source.Event(detailCtx, old.ID)
+		if err := m.store.AdvanceDetailCursor(slug, old.ID); err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if sourceErr != nil {
+			unavailable = true
+			budgetFailure = errors.Is(sourceErr, api.ErrScanBudget)
+			until := retryDeadline(sourceErr, m.now())
+			if !until.IsZero() {
+				if err := m.store.MarkProviderError(slug, "Event detail verification deferred by upstream Retry-After", until); err != nil {
+					return err
+				}
+				break
+			}
+			if errors.Is(sourceErr, api.ErrScanBudget) || detailCtx.Err() != nil {
+				break
+			}
+			continue // HTTP 404/410 is not proof of withdrawal.
+		}
+		if detail.ID != old.ID || detail.Provider.Slug != slug || (detail.Status != "published" && detail.Status != "retracted") {
+			continue
+		}
+		detections, err := m.store.CommitDetails(slug, []model.Event{detail}, m.policy, m.now())
+		if err != nil {
+			return err
+		}
+		m.logDetections(cycle, slug, detections)
+	}
+	if unavailable {
+		m.logger.Warn("Some event details could not be verified; stored decisions remain available", "provider", slug)
+		if budgetFailure {
+			return sourceFailures{fmt.Errorf("provider %s detail verification exceeded scan budget", slug)}
+		}
 	}
 	return nil
 }
@@ -193,32 +247,22 @@ func (m *monitor) deliver(ctx context.Context, channel string, once bool) error 
 		default:
 		}
 		// A scan may have canceled or updated an entry after Due's snapshot.
-		delivery, found, err := m.store.Delivery(queued.Notification.ID)
+		delivery, found, err := m.store.BeginAttempt(queued.Notification.ID, time.Now())
 		if err != nil {
 			return err
 		}
-		if !found || delivery.Status != "pending" {
+		if !found {
 			continue
 		}
-		cooldown, err := m.store.RecipientCooldown(channel, delivery.Destination)
-		if err != nil {
-			return err
-		}
-		if time.Now().Before(cooldown) {
-			break
-		}
-		m.logger.Info("Notification attempt", "channel", channel, "notification_id", delivery.Notification.ID, "event_id", delivery.Notification.Event.ID, "attempt", delivery.Attempts+1)
+		m.logger.Info("Notification attempt", "channel", channel, "notification_id", delivery.Notification.ID, "event_id", delivery.Notification.Event.ID, "attempt", delivery.Attempts)
 		result := m.sender.Send(ctx, channel, delivery.Notification)
 		// An acknowledged request must be recorded even if shutdown raced with its response.
-		if ctx.Err() != nil && !result.Success {
-			return nil
-		}
 		m.metrics.ObserveDelivery(channel, result)
-		if err := m.store.Complete(delivery.Notification.ID, result, time.Now()); err != nil {
+		if err := m.store.CompleteAttempt(delivery.AttemptID, result, m.policy, time.Now()); err != nil {
 			return err
 		}
 		if result.Success {
-			m.logger.Info("Notification delivered", "channel", channel, "notification_id", delivery.Notification.ID, "event_id", delivery.Notification.Event.ID, "status_code", result.StatusCode, "duration", result.Duration, "recovered", delivery.Attempts > 0)
+			m.logger.Info("Notification delivered", "channel", channel, "notification_id", delivery.Notification.ID, "event_id", delivery.Notification.Event.ID, "status_code", result.StatusCode, "duration", result.Duration, "recovered", delivery.Attempts > 1)
 		} else {
 			failed = true
 			m.logger.Warn("Notification delivery failed", "channel", channel, "notification_id", delivery.Notification.ID, "event_id", delivery.Notification.Event.ID, "status_code", result.StatusCode, "retryable", result.Retryable, "error", result.Error)
@@ -242,15 +286,35 @@ func RetryFailed(cfg config.Config) (int, error) {
 	if err := db.Reconcile(makePolicy(cfg)); err != nil {
 		return 0, err
 	}
-	count, err := db.RetryFailed(time.Now())
+	count, err := db.RetryFailedWithPolicy(makePolicy(cfg), time.Now())
 	if err != nil {
 		return 0, err
 	}
 	return count, db.PublishStatus(false, time.Now())
 }
 
+// RetryDelivery schedules one permanent failure. Offline commands take the
+// exclusive database lock; the daemon uses the same store operation via control.
+func RetryDelivery(cfg config.Config, id string) (state.Delivery, error) {
+	db, err := state.Open(cfg.StatePath)
+	if err != nil {
+		return state.Delivery{}, err
+	}
+	defer db.Close()
+	policy := makePolicy(cfg)
+	if err := db.Reconcile(policy); err != nil {
+		return state.Delivery{}, err
+	}
+	delivery, err := db.RetryDelivery(id, policy, time.Now())
+	if err != nil {
+		return state.Delivery{}, err
+	}
+	return delivery, db.PublishStatus(false, time.Now())
+}
+
 func makePolicy(cfg config.Config) state.Policy {
-	policy := state.Policy{Channels: map[string]string{}, Match: func(event model.Event) (bool, string) { return filter.Match(event, cfg) }}
+	filters, _ := json.Marshal(cfg.FilterSpec())
+	policy := state.Policy{Channels: map[string]string{}, Changes: map[string]bool{"telegram": cfg.Telegram.NotifyChanges, "slack": cfg.Slack.NotifyChanges, "webhook": cfg.Webhook.NotifyChanges}, FilterConfig: filters, Match: func(event model.Event) (bool, string) { return filter.Match(event, cfg) }}
 	for _, provider := range cfg.Providers {
 		policy.Providers = append(policy.Providers, provider.Slug)
 	}

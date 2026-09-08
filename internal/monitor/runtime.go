@@ -15,6 +15,7 @@ import (
 	"github.com/DKPlugins/TokenResetsMonitor/internal/api"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/config"
+	"github.com/DKPlugins/TokenResetsMonitor/internal/control"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/fileio"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/notify"
@@ -299,6 +300,40 @@ func RunWithOptions(parent context.Context, cfg config.Config, logger *slog.Logg
 	}
 	current := startGeneration(ctx, active, m, fatal)
 	defer func() { cancel(); current.drain(); <-current.done }()
+	type controlAnswer struct {
+		value any
+		err   error
+	}
+	type controlCall struct {
+		ctx     context.Context
+		request control.Request
+		answer  chan controlAnswer
+	}
+	commands := make(chan controlCall, 16)
+	controller, err := control.Start(cfg.StatePath, func(requestCtx context.Context, request control.Request) (any, error) {
+		call := controlCall{requestCtx, request, make(chan controlAnswer, 1)}
+		select {
+		case <-ctx.Done():
+			return nil, errors.New("monitor_stopping")
+		case <-requestCtx.Done():
+			return nil, errors.New("control_request_timeout")
+		case commands <- call:
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.New("monitor_stopping")
+		case <-requestCtx.Done():
+			return nil, errors.New("control_request_timeout")
+		case result := <-call.answer:
+			return result.value, result.err
+		}
+	})
+	if err != nil {
+		return err
+	}
+	defer controller.Close()
+	maintenance := time.NewTicker(time.Minute)
+	defer maintenance.Stop()
 	changes := make(chan candidate, 1)
 	watchInterval := opts.WatchInterval
 	if watchInterval <= 0 {
@@ -393,6 +428,25 @@ func RunWithOptions(parent context.Context, cfg config.Config, logger *slog.Logg
 			return nil
 		case err := <-fatal:
 			return err
+		case err := <-controller.Errors():
+			return err
+		case call := <-commands:
+			if call.ctx.Err() != nil {
+				continue
+			}
+			if runtime.ReloadPending && (call.request.Operation == "deliveries.retry" || call.request.Operation == "deliveries.retry-failed") {
+				call.answer <- controlAnswer{err: control.ErrBusy}
+				continue
+			}
+			value, err := control.Dispatch(db, m.policy, active.FilterSpec(), call.request)
+			if err == nil {
+				value, err = control.WithMetadata(value, "running", runtime.ConfigGeneration)
+			}
+			call.answer <- controlAnswer{value, err}
+		case <-maintenance.C:
+			if _, err := db.PruneHistory(time.Now(), active.History.RetentionDays, 200); err != nil {
+				return err
+			}
 		case <-heartbeat.C:
 			if err := publish(true); err != nil {
 				return err

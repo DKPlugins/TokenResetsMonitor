@@ -3,9 +3,11 @@
 set -eu
 [ "${CI:-}" = true ] || { echo 'Only run on a disposable CI runner (CI=true).' >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo 'Root is required for the systemd lifecycle test.' >&2; exit 2; }
-if [ -e /usr/local/bin/tokenresetsmonitor ] || [ -e /etc/tokenresetsmonitor ]; then
-    echo 'An installation already exists; refusing to change it.' >&2; exit 1
-fi
+for existing in /usr/local/bin/tokenresetsmonitor /etc/tokenresetsmonitor /var/lib/tokenresetsmonitor /var/log/tokenresetsmonitor /etc/systemd/system/tokenresetsmonitor.service; do
+    if [ -e "$existing" ] || [ -L "$existing" ]; then
+        echo 'An installation or retained data already exists; refusing to change it.' >&2; exit 1
+    fi
+done
 cleanup() {
     result=$?
     trap - EXIT

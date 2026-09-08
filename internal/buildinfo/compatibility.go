@@ -19,7 +19,7 @@ type Manifest struct {
 
 func CurrentManifest() Manifest {
 	return Manifest{ManifestVersion: 1, Version: Version,
-		Config: SchemaRange{Minimum: 1, Current: 2}, State: SchemaRange{Minimum: 0, Current: 2},
+		Config: SchemaRange{Minimum: 1, Current: 3}, State: SchemaRange{Minimum: 0, Current: 3},
 		WebhookSchema: 1, APISchemaMajor: 1,
 		Platforms: []string{"linux/amd64", "linux/arm64", "windows/amd64"}}
 }

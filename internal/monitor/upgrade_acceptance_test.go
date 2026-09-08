@@ -82,8 +82,13 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 		return output
 	}
 	type binaryVersion struct {
-		Version string `json:"version"`
-		Commit  string `json:"commit"`
+		Version       string `json:"version"`
+		Commit        string `json:"commit"`
+		Compatibility struct {
+			Config struct {
+				Current int `json:"current"`
+			} `json:"config"`
+		} `json:"compatibility"`
 	}
 	version := func(binary string) binaryVersion {
 		t.Helper()
@@ -99,6 +104,14 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 	oldVersion, newVersion := version(oldPath), version(newPath)
 	if oldVersion.Version == newVersion.Version {
 		t.Fatal("cross-version acceptance requires different application versions")
+	}
+	var manifest struct {
+		State struct {
+			Current int `json:"current"`
+		} `json:"state"`
+	}
+	if err := json.Unmarshal(run(newPath, 0, "compatibility-manifest"), &manifest); err != nil || manifest.State.Current < 1 {
+		t.Fatal("candidate must declare its current state schema", err)
 	}
 	checksum := func(path string) string {
 		t.Helper()
@@ -158,9 +171,13 @@ func TestBinaryUpgradeRollbackAcceptance(t *testing.T) {
 	defer server.Close()
 	statePath := filepath.Join(workspace, "state.db")
 	configPath := filepath.Join(workspace, "config.yaml")
-	// Keep this fixture at the actual previous contract. Marshaling current
-	// Defaults would introduce schema 2 and fields the 1.0 validator rejects.
-	legacyConfig := fmt.Sprintf(`config_version: 1
+	// Use the previous binary's actual configuration schema, including schema 2
+	// for the 1.1 candidates. Stable 1.0 predates compatibility metadata.
+	previousConfigSchema := oldVersion.Compatibility.Config.Current
+	if previousConfigSchema == 0 {
+		previousConfigSchema = 1
+	}
+	legacyConfig := fmt.Sprintf(`config_version: %d
 api_base_url: %q
 state_path: %q
 providers:
@@ -173,7 +190,7 @@ telegram:
   enabled: false
 logging:
   file_enabled: false
-`, server.URL+"/api/v1", statePath, server.URL+"/webhook")
+`, previousConfigSchema, server.URL+"/api/v1", statePath, server.URL+"/webhook")
 	if err := os.WriteFile(configPath, []byte(legacyConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +211,15 @@ logging:
 		}
 	}
 	run(oldPath, 0, "run", "--once", "--config", configPath)
-	assertStopped(status(oldPath), 0)
+	previousStatus := status(oldPath)
+	assertStopped(previousStatus, 0)
+	previousSchema := 1 // Stable 1.0 predates runtime metadata in status JSON.
+	if previousStatus.Runtime != nil {
+		previousSchema = previousStatus.Runtime.StateSchemaVersion
+	}
+	if previousSchema < 1 || previousSchema >= manifest.State.Current {
+		t.Fatal("migration acceptance requires an older supported state schema")
+	}
 	mu.Lock()
 	if len(notifications) != 0 {
 		mu.Unlock()
@@ -229,8 +254,8 @@ logging:
 	for {
 		run(newPath, 0, "run", "--once", "--config", configPath)
 		current := status(newPath)
-		if current.Runtime == nil || current.Runtime.StateSchemaVersion != 2 {
-			t.Fatal("candidate did not publish migrated state schema 2")
+		if current.Runtime == nil || current.Runtime.StateSchemaVersion != manifest.State.Current {
+			t.Fatal("candidate did not publish its declared state schema")
 		}
 		if current.Pending == 0 {
 			assertStopped(current, 0)
@@ -261,7 +286,8 @@ logging:
 	}
 	beforeRefusal := checksum(statePath)
 	refusal := run(oldPath, 1, "run", "--once", "--config", configPath)
-	if !bytes.Contains(refusal, []byte("state schema 2 is newer than supported schema 1")) {
+	wantRefusal := fmt.Sprintf("state schema %d is newer than supported schema %d", manifest.State.Current, previousSchema)
+	if !bytes.Contains(refusal, []byte(wantRefusal)) {
 		t.Fatal("previous binary did not explicitly reject migrated state")
 	}
 	if checksum(statePath) != beforeRefusal {

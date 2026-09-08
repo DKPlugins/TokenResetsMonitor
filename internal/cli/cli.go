@@ -37,7 +37,10 @@ Usage: tokenresetsmonitor <command> [options]
   status                       Show the latest daemon status snapshot
   test-notification <channel>  Send a TEST notification (webhook|telegram|slack|all)
   logs export                  Export redacted diagnostics locally
-  deliveries retry-failed      Requeue failed deliveries while stopped
+  history list|show|explain    Inspect real events and notification decisions
+  filters preview             Compare candidate filters without sending
+  deliveries list|show|retry   Inspect deliveries or retry a failed delivery
+  deliveries retry-failed      Requeue eligible failures, including while running
   service <action>             Windows service install/start/stop/status/uninstall
   healthcheck [--ready]        Check local daemon health without secrets
   check-update                 Check releases and declared compatibility
@@ -69,6 +72,14 @@ type options struct {
 	includePrerelease bool
 	structural        bool
 	logDirectory      string
+	recordID          string
+	channel           string
+	status            string
+	eventID           string
+	limit             int
+	cursor            string
+	candidatePath     string
+	until             string
 }
 
 func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
@@ -106,7 +117,7 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	}
 	sub := ""
 	switch command {
-	case "config", "test-notification", "logs", "deliveries", "service", "setup":
+	case "config", "test-notification", "logs", "deliveries", "history", "filters", "service", "setup":
 		if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
 			fmt.Fprintln(errOut, "A subcommand/channel is required.")
 			return 2
@@ -115,6 +126,11 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 		rest = rest[1:]
 	}
 	opts := options{}
+	if (command == "history" && (sub == "show" || sub == "explain")) || (command == "deliveries" && (sub == "show" || sub == "retry")) {
+		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+			opts.recordID, rest = rest[0], rest[1:]
+		}
+	}
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	path := config.DefaultPath()
@@ -156,7 +172,23 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 			fs.BoolVar(&opts.includePrerelease, "include-prerelease", false, "also consider prereleases")
 		}
 
-	case "service", "deliveries":
+	case "history", "filters", "deliveries":
+		fs.BoolVar(&opts.json, "json", false, "JSON output")
+		fs.StringVar(&opts.provider, "provider", "", "provider slug")
+		fs.StringVar(&opts.eventID, "event", "", "event ID")
+		fs.StringVar(&opts.eventID, "event-id", "", "event ID")
+		fs.StringVar(&opts.recordID, "id", opts.recordID, "event or delivery ID")
+		fs.StringVar(&opts.since, "since", "", "detected/created since duration or RFC3339 timestamp")
+		fs.StringVar(&opts.until, "until", "", "detected/created until RFC3339 timestamp")
+		fs.StringVar(&opts.channel, "channel", "", "delivery channel")
+		fs.StringVar(&opts.status, "status", "", "record status")
+		fs.IntVar(&opts.limit, "limit", 50, "page size (1-200)")
+		fs.StringVar(&opts.cursor, "cursor", "", "next page cursor")
+		if command == "filters" {
+			fs.StringVar(&opts.candidatePath, "candidate", "", "candidate filter YAML file")
+			fs.StringVar(&opts.candidatePath, "candidate-config", "", "candidate filter YAML file")
+		}
+	case "service":
 	default:
 		fmt.Fprintln(errOut, "Unknown command. Use --help.")
 		return 2
@@ -164,9 +196,17 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	if e := fs.Parse(rest); errors.Is(e, flag.ErrHelp) {
 		printCommandHelp(command, sub, out)
 		return 0
-	} else if e != nil || fs.NArg() != 0 {
+	} else if e != nil {
 		fmt.Fprintln(errOut, "Invalid arguments. Use --help.")
 		return 2
+	}
+	if fs.NArg() != 0 {
+		needsID := (command == "history" && (sub == "show" || sub == "explain")) || (command == "deliveries" && (sub == "show" || sub == "retry"))
+		if !needsID || opts.recordID != "" || fs.NArg() != 1 {
+			fmt.Fprintln(errOut, "Invalid arguments. Use --help.")
+			return 2
+		}
+		opts.recordID = fs.Arg(0)
 	}
 	overrides := map[string]string{}
 	fs.Visit(func(f *flag.Flag) {
@@ -192,6 +232,9 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 	}
 	if command == "healthcheck" {
 		return healthcheck(opts, out, errOut)
+	}
+	if command == "history" || command == "filters" || command == "deliveries" {
+		return management(ctx, command, sub, opts, overrides, out, errOut)
 	}
 	if command == "setup" {
 		if len(overrides) > 0 {
@@ -391,18 +434,7 @@ func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Wr
 		}
 		fmt.Fprintln(out, "Diagnostics saved locally; nothing was uploaded.")
 		return 0
-	case "deliveries":
-		if sub != "retry-failed" {
-			fmt.Fprintln(errOut, "Unknown deliveries subcommand.")
-			return 2
-		}
-		n, e := monitor.RetryFailed(cfg)
-		if e != nil {
-			fmt.Fprintln(errOut, "Cannot retry failed deliveries:", e)
-			return 1
-		}
-		fmt.Fprintf(out, "Requeued %d failed deliveries. Start the monitor to send them.\n", n)
-		return 0
+
 	}
 	return 2
 }

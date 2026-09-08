@@ -1,15 +1,15 @@
 # Installing TokenResetsMonitor
 
-The service installer examples below target the existing published `v1.0.0`. The new 1.1 capabilities require a source build or a future published 1.1 release. Replace the exact tag consistently after that release is available. For the development Docker setup, follow the [README](../README.md#docker).
+The service installer examples below target stable `v1.2.0`. Use the same exact tag for the installer and binary archive. Before upgrading an older installation, preserve its configuration/state backup as described in the [upgrade guide](upgrading.md). For the source Docker setup, follow the [README](../README.md#docker).
 
 ### Linux: systemd or foreground
 
 The installer supports Linux amd64/arm64 and requires root, `curl`, `tar`, `sha256sum`, `fuser` (usually the `psmisc` package), and standard account-management tools. Download the script for the desired version and inspect it before running:
 
 ```sh
-curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0/install.sh -o install.sh
+curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.2.0/install.sh -o install.sh
 less install.sh
-sudo sh install.sh --version v1.0.0 --no-start
+sudo sh install.sh --version v1.2.0 --no-start
 sudoedit /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor config validate --config /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor test-notification all --config /etc/tokenresetsmonitor/config.yaml
@@ -37,9 +37,9 @@ The supplied unit permits writes only in the default state/log directories. If y
 Run the installer in **Administrator PowerShell**:
 
 ```powershell
-Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0/install.ps1 -OutFile install.ps1
+Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.2.0/install.ps1 -OutFile install.ps1
 Get-Content ./install.ps1
-./install.ps1 -Version v1.0.0 -NoStart
+./install.ps1 -Version v1.2.0 -NoStart
 notepad "$env:ProgramData\TokenResetsMonitor\config.yaml"
 $monitor = "$env:ProgramFiles\TokenResetsMonitor\tokenresetsmonitor.exe"
 & $monitor config validate --config "$env:ProgramData\TokenResetsMonitor\config.yaml"
@@ -60,7 +60,7 @@ The installer verifies SHA-256 and runs the service as `NT AUTHORITY\LocalServic
 
 `service stop`, `service start`, `service status`, and `service uninstall` work from an Administrator terminal. Uninstall removes service registration and preserves configuration, state, and logs. Startup failures appear in **Event Viewer → Windows Logs → Application**, source `TokenResetsMonitor`.
 
-For manual installation, place the executable and configuration in permanent locations, grant LocalService the permissions above, then run `tokenresetsmonitor service install --config C:\absolute\config.yaml`. A file created by `init` is private to its owner, SYSTEM, and Administrators. Add an explicit LOCAL SERVICE Read entry through Windows Security settings before manual service installation; 1.1 refuses registration with an actionable error when this grant is missing or cannot be verified. The installer applies this read-only grant automatically after initialization and keeps historical backups private. The service stores absolute, correctly quoted paths. Its working directory is not your shell's working directory. Process environment variables set in PowerShell are not inherited by SCM; use the protected configuration file or explicitly configure the service's environment through Windows administration.
+For manual installation, place the executable and configuration in permanent locations, grant LocalService the permissions above, then run `tokenresetsmonitor service install --config C:\absolute\config.yaml`. A file created by `init` is private to its owner, SYSTEM, and Administrators. Add an explicit LOCAL SERVICE Read entry through Windows Security settings before manual service installation; registration is refused with an actionable error when this grant is missing or cannot be verified. The installer applies this read-only grant automatically after initialization and keeps historical backups private. The service stores absolute, correctly quoted paths. Its working directory is not your shell's working directory. Process environment variables set in PowerShell are not inherited by SCM; use the protected configuration file or explicitly configure the service's environment through Windows administration.
 
 ## Docker directory mounts
 
@@ -78,6 +78,6 @@ The Linux installer validates the candidate using systemd's parser for the stand
 
 The Windows installer temporarily includes the service's `Environment` registry assignments while validating the candidate, then restores the installer's environment. If you use additional custom service wrappers or environment drop-ins, verify the candidate under that same environment before replacing the executable.
 
-The 1.1 installers run `config validate --structural` before replacement and after copying. Unknown fields, unsupported schemas, and invalid literal settings still fail. References to unavailable environment variables are reported as deferred requirements, allowing `--no-start` / `-NoStart` to finish before secrets are provisioned. This check does not certify runtime readiness: ordinary `config validate` and daemon startup still require the complete service environment.
+The installers run `config validate --structural` before replacement and after copying. Unknown fields, unsupported schemas, and invalid literal settings still fail. References to unavailable environment variables are reported as deferred requirements, allowing `--no-start` / `-NoStart` to finish before secrets are provisioned. This check does not certify runtime readiness: ordinary `config validate` and daemon startup still require the complete service environment.
 
 The installers preserve existing configuration/state and make stopped backups. Paths outside the installer-managed state directory require your own backup. Follow [upgrading.md](upgrading.md) before changing a release.

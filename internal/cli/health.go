@@ -76,7 +76,9 @@ func printCommandHelp(command, sub string, out io.Writer) {
 		"check-update":      "check-update [--json] [--include-prerelease] [--config PATH]\nCheck published releases and declared compatibility. Never installs anything.",
 		"doctor":            "doctor [--offline] [--json] [--config PATH] [--state-path PATH]\nCheck configuration, local paths and source API. --offline disables network checks.",
 		"logs":              "logs export [--since 24h] [--output diagnostics.zip] [--input FILE|-] [--log-directory PATH]\nExport redacted diagnostics locally. Existing archives are never overwritten.",
-		"deliveries":        "deliveries retry-failed --config PATH\nStop the monitor first, then requeue eligible permanent failures after fixing the destination.",
+		"history":           "history list [--provider SLUG] [--since 24h] [--until RFC3339] [--limit 50] [--cursor CURSOR] [--json]\nhistory show|explain --id EVENT_ID [--provider SLUG] [--json]\nRead recorded events and decisions; explain also evaluates active filters. Stopped queries never migrate state.",
+		"filters":           "filters preview --candidate-config PATH [--provider SLUG] [--limit 50] [--cursor CURSOR] [--json]\nCompare active and candidate filters on stored real events without changing configuration or sending messages.",
+		"deliveries":        "deliveries list [--event-id ID] [--provider SLUG] [--channel CHANNEL] [--status STATUS] [--since 24h] [--until RFC3339] [--limit 50] [--cursor CURSOR] [--json]\ndeliveries show --id ID [--limit 50] [--cursor CURSOR] [--json]\ndeliveries retry --id ID | deliveries retry-failed [--json]\nInspect attempts and retry eligible failures while the monitor keeps running. Stopped retries queue work for the next run.",
 		"service":           "service install|start|stop|status|uninstall [--config PATH]\nManage the Windows service from an Administrator terminal; install uses saved settings.",
 	}
 	if text, ok := usage[command]; ok {

@@ -146,19 +146,31 @@ func ValidateTemplate(body string) error {
 			Title: "Validation", EventType: "hard_reset", Status: "published", Revision: 1, AnnouncedAt: now,
 			Scope:      model.Scope{Plans: []string{"plus"}, Products: []string{"codex"}, Windows: []string{"weekly"}, Evidence: "unknown"},
 			Confidence: model.Confidence{Label: "reported", Score: 0.5}, Links: model.Links{HTML: "https://tokenresets.com/"}}}
-	// Cover both production/test and optional dates absent/present. Templates
+	// Cover announcements and amendments, production/test, and optional dates.
 	// must guard optional values rather than permanently failing real deliveries.
-	for _, test := range []bool{false, true} {
-		n.Test = test
-		n.Event.PublishedAt, n.Event.EffectiveAt = nil, nil
-		n.Event.ExpectedBy, n.Event.ObservedEffectiveAt, n.Event.ExpiresAt = nil, nil, nil
-		if _, err := RenderTemplate(body, n); err != nil {
-			return err
+	for _, kind := range []string{"", "correction", "retraction"} {
+		n.Kind = kind
+		n.PreviousEvent, n.Changes, n.RelatedNotificationID = nil, nil, ""
+		if kind != "" {
+			previous := n.Event
+			previous.PublishedAt, previous.EffectiveAt = nil, nil
+			previous.ExpectedBy, previous.ObservedEffectiveAt, previous.ExpiresAt = nil, nil, nil
+			n.PreviousEvent = &previous
+			n.RelatedNotificationID = "original-validation"
+			n.Changes = []model.FieldChange{{Field: "scope.plans", Before: "plus", After: "pro"}}
 		}
-		n.Event.PublishedAt, n.Event.EffectiveAt = &now, &now
-		n.Event.ExpectedBy, n.Event.ObservedEffectiveAt, n.Event.ExpiresAt = &now, &now, &now
-		if _, err := RenderTemplate(body, n); err != nil {
-			return err
+		for _, test := range []bool{false, true} {
+			n.Test = test
+			n.Event.PublishedAt, n.Event.EffectiveAt = nil, nil
+			n.Event.ExpectedBy, n.Event.ObservedEffectiveAt, n.Event.ExpiresAt = nil, nil, nil
+			if _, err := RenderTemplate(body, n); err != nil {
+				return err
+			}
+			n.Event.PublishedAt, n.Event.EffectiveAt = &now, &now
+			n.Event.ExpectedBy, n.Event.ObservedEffectiveAt, n.Event.ExpiresAt = &now, &now, &now
+			if _, err := RenderTemplate(body, n); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

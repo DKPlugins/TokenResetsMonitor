@@ -20,7 +20,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const Version = 2
+const Version = 3
 
 var envReference = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -43,8 +43,8 @@ func Defaults() Config {
 		Providers:  []ProviderFilter{{Slug: "openai-codex"}, {Slug: "anthropic-claude"}},
 		EventTypes: []string{"hard_reset"}, MinimumConfidence: "reported", UnknownScope: "include",
 		Webhook:       Webhook{Method: "POST", Timeout: "15s", Headers: map[string]string{}},
-		Telegram:      Telegram{Timeout: "15s", APIBaseURL: "https://api.telegram.org"},
-		Slack:         Slack{Timeout: "15s"},
+		Telegram:      Telegram{NotifyChanges: true, Timeout: "15s", APIBaseURL: "https://api.telegram.org"},
+		Slack:         Slack{NotifyChanges: true, Timeout: "15s"},
 		Reload:        Reload{Enabled: true},
 		Observability: Observability{Listen: "127.0.0.1:9090"},
 		Updates:       Updates{Enabled: true, Interval: "24h"},
@@ -82,7 +82,7 @@ func decodeRaw(data []byte) (Config, error) {
 	if err := decode(data, &cfg); err != nil {
 		return cfg, err
 	}
-	if cfg.ConfigVersion == 1 {
+	if cfg.ConfigVersion == 1 || cfg.ConfigVersion == 2 {
 		cfg.ConfigVersion = Version
 	}
 	if cfg.ConfigVersion != Version {
@@ -284,6 +284,9 @@ func expandResolved(v reflect.Value, key string, resolve stringResolver) error {
 }
 
 func Validate(cfg Config) error {
+	if cfg.History.RetentionDays < 0 || cfg.History.RetentionDays > 36500 {
+		return errors.New("history.retention_days must be between 0 and 36500")
+	}
 	if cfg.ConfigVersion != Version {
 		return errors.New("unsupported config_version")
 	}

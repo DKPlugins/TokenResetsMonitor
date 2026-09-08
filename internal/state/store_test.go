@@ -366,7 +366,7 @@ func TestReadStatusRejectsOversizedSnapshot(t *testing.T) {
 }
 
 func TestLegacyMigrationBackupAndFutureSchemaRefusal(t *testing.T) {
-	for _, version := range []string{"0", "1", "3"} {
+	for _, version := range []string{"0", "1", "2", "4"} {
 		t.Run(version, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.db")
 			db, err := bolt.Open(path, 0600, nil)
@@ -394,7 +394,7 @@ func TestLegacyMigrationBackupAndFutureSchemaRefusal(t *testing.T) {
 				t.Fatal(err)
 			}
 			s, err := state.Open(path)
-			if version == "3" {
+			if version == "4" {
 				if err == nil {
 					_ = s.Close()
 					t.Fatal("future schema accepted")
@@ -425,7 +425,7 @@ func TestLegacyMigrationBackupAndFutureSchemaRefusal(t *testing.T) {
 					if string(meta.Get([]byte("canary"))) != "preserve me" {
 						t.Fatal("migration lost existing data")
 					}
-					want := "2"
+					want := "3"
 					if checkPath == backups[0] {
 						want = version
 					}

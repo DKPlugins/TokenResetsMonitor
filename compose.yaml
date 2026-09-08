@@ -1,6 +1,6 @@
 services:
   monitor:
-    # The source checkout builds the current release candidate by default.
+    # The source checkout builds the current version by default.
     # Set TRM_VERSION to an exact published tag and use --no-build for releases.
     image: ghcr.io/dkplugins/tokenresetsmonitor:${TRM_VERSION:-local}
     build: .

@@ -78,6 +78,16 @@ A real test sends a unique synthetic TEST event and makes one attempt per select
 
 Dry-run performs no network requests and reports redacted destination, HTTP method, header names, and body size. It never prints tokens, header values, or the message body.
 
-Operational changes reload automatically. Newly enabled destinations establish their own baseline without a historical backlog. Failed permanent deliveries can be requeued with `deliveries retry-failed` while the daemon is stopped; only entries still eligible under the current filters/destination are retried.
+Operational changes reload automatically. Newly enabled destinations establish their own baseline without a historical backlog. Failed permanent deliveries can be requeued with `deliveries retry --id ID` or `deliveries retry-failed` while the daemon is running or stopped; only entries still eligible under the accepted configuration and current destination are retried. See [history and delivery management](history.md).
 
 On Windows, setup preserves a supported private existing ACL and its LocalService read grant. Legacy files shared with Everyone/Users or unsupported principals are refused without rewriting the original; a private backup is retained. Restrict the file through Windows Security settings or use the installer-managed permissions before retrying. On Linux, replacement preserves the existing owner/group and service group-read permission while removing world access.
+
+## Corrections and withdrawals
+
+After a destination acknowledges an announcement, a meaningful source revision can produce a follow-up describing what changed: for example, `Plans: pro → plus, pro`, a changed effective date, or an explicit withdrawal. The comparison is against the version acknowledged by that destination. It is labeled as a correction or withdrawal so it cannot be mistaken for another quota reset. A revision number change with identical meaningful content does not generate a message. Disappearance from an event list alone is not a withdrawal.
+
+Telegram and Slack use `notify_changes: true` by default. Disable it independently on either channel if wanted. Webhooks default to `notify_changes: false`; enable it only after the receiver understands `kind`, `previous_event`, `changes`, and `related_notification_id`. An absent `kind` remains an ordinary announcement. Each change delivery has its own stable idempotency key. Custom templates can use `.Kind`, `.PreviousEvent`, `.Changes`, and `.RelatedNotificationID`; guard the optional previous snapshot before accessing it.
+
+Some migrated records cannot prove the exact version originally acknowledged. Such comparisons are marked unverified (`previous_event_unverified: true` in JSON) so a receiver does not treat reconstructed legacy detail as confirmed history.
+
+Change messages follow the recipient that acknowledged the original announcement. They do not create a backlog for a newly enabled destination, and current plan filters do not hide a withdrawal of an announcement already sent there. Disabled or changed recipients receive no follow-up. Ordinary unsent announcements are still checked against the current filters and source status before delivery.

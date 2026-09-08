@@ -203,6 +203,9 @@ func validHeaderName(name string) bool {
 }
 
 func telegramText(n model.Notification) string {
+	if n.Kind == "correction" || n.Kind == "retraction" {
+		return amendmentText(n)
+	}
 	e := n.Event
 	prefix := "TokenResetsMonitor"
 	if n.Test {

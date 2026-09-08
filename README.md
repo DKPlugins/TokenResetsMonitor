@@ -6,13 +6,17 @@ Get notified when [TokenResets](https://tokenresets.com/api/) publishes an AI qu
 
 **These are public announcements, not a meter for your account's remaining tokens.** An announcement does not confirm that your personal limits have reset. Unknown scope stays unknown; announcement, effective, and detection times are shown separately. Read the source's [methodology](https://tokenresets.com/methodology/). This independent project is not affiliated with TokenResets, OpenAI, Anthropic, Telegram, or Slack.
 
-This checkout is the **1.1.0-rc.2 release candidate**. Slack, assisted setup, live reload, metrics, health checks, and update checking described here require this version. The earlier published stable [v1.0.0 release](https://github.com/DKPlugins/TokenResetsMonitor/releases/tag/v1.0.0) has webhook/Telegram monitoring; its completed checks are preserved in the [historical acceptance record](docs/acceptance.md). This candidate is intended for testing before the stable 1.1 release; publication and platform acceptance are tracked in the [release guide](docs/releasing.md).
+**Version 1.2.0** adds event history, explanations for missing notifications, safe filter previews, live delivery retries, and correction/withdrawal messages. It also includes Slack, assisted setup, live reload, metrics, health checks, and update checking from the 1.1 candidates. Read the [upgrade guide](docs/upgrading.md) before replacing an older installation: configuration and state now use schema 3.
 
 ## What it does
 
 - Filters announcements by provider, plan, product, reset window, event type, and confidence.
 - Polls immediately and then every 30 minutes by default. First startup quietly records existing history.
 - Keeps independent durable delivery queues; a failing destination does not block another.
+- Explains baseline suppression, filter rejection, queued work, failed attempts, and completed deliveries.
+- Previews proposed filters against stored real events without sending messages.
+- Lists event and delivery history and retries a selected failed delivery while monitoring continues.
+- Sends clear comparisons when an acknowledged announcement is corrected or withdrawn.
 - Connects Telegram with a guided bot pairing flow and supports Slack incoming webhooks.
 - Applies operational YAML changes while running, retaining the last valid configuration on errors.
 - Exposes optional Prometheus metrics and separate liveness/readiness checks.
@@ -34,7 +38,7 @@ Source: https://tokenresets.com/ — personal account limits are not confirmed
 
 ## Start in a few minutes
 
-To try this release candidate, build from the source checkout with Go 1.26 or newer:
+Build from the source checkout with Go 1.26 or newer:
 
 ```sh
 go build ./cmd/tokenresetsmonitor
@@ -81,7 +85,7 @@ Edit `config/config.yaml` to select providers and destinations. Mounting the dir
 
 The container runs as UID/GID `10001` with a read-only root filesystem. History is stored in the named `monitor-data` volume. Health checks work without an HTTP port. Metrics listen on port `9090` inside the Compose network; no host port is published. [Scraping metrics and interpreting health →](docs/observability.md)
 
-Once the candidate is published, set `TRM_VERSION=v1.1.0-rc.2`, then use `docker compose pull` and `docker compose up -d --no-build`. The default `local` image is built from this checkout. Preserve the data volume when updating.
+To use the published image, set `TRM_VERSION=v1.2.0`, then use `docker compose pull` and `docker compose up -d --no-build`. The default `local` image is built from this checkout. Preserve the data volume when updating.
 
 ## Commands you will use
 
@@ -98,11 +102,17 @@ Once the candidate is published, set `TRM_VERSION=v1.1.0-rc.2`, then use `docker
 | `check-update [--json]` | Check published project releases; never install |
 | `test-notification webhook\|telegram\|slack\|all` | Send one synthetic TEST per selected destination |
 | `logs export --since 24h --output diagnostics.zip` | Create a redacted local support archive |
-| `deliveries retry-failed` | Requeue eligible failed deliveries while stopped |
+| `history list` / `history show --id ID` | Browse observed events and their retained details |
+| `history explain --id ID` | Explain whether and why each destination received an event |
+| `filters preview --candidate-config PATH` | Compare proposed filters on stored real events without sending |
+| `deliveries list` / `deliveries show --id ID` | Inspect delivery status, attempts, cancellation, and next retry |
+| `deliveries retry --id ID` / `deliveries retry-failed` | Requeue eligible failed deliveries, including while running |
 | `service install\|start\|stop\|status\|uninstall` | Manage the native Windows service |
 | `version [--json]` | Show build information |
 
 Use `--config PATH` for configuration-dependent commands. The examples use a binary in the current directory; omit `./` when it is on your PATH. Exit codes are `0` for success, `1` for runtime/check failure, and `2` for invalid arguments/configuration. Doctor reports diagnostic failures as `1`; warnings remain visible without failing the command. An available update is a successful check, not an error.
+
+History, filter-preview, and delivery commands support `--json`. Lists are paginated; use `--limit` and the returned `--cursor`. Start with `history list`, copy an event ID into `history explain --id ID`, and follow its delivery IDs to `deliveries show --id ID`. See [history and delivery management](docs/history.md) for examples and retention settings.
 
 ## Configuration and live reload
 
@@ -118,6 +128,7 @@ Changing state location, source API origin, metrics listener, or logging output/
 - [Telegram, Slack, and webhook setup](docs/notifications.md)
 - [Metrics, liveness/readiness, and alert examples](docs/observability.md)
 - [Upgrading, compatibility checks, backups, and rollback](docs/upgrading.md)
+- [Event history, filter previews, and live delivery retries](docs/history.md)
 - [Architecture, delivery guarantees, and webhook contract](docs/architecture.md)
 - [Contributing and local verification](CONTRIBUTING.md)
 
@@ -128,7 +139,7 @@ Background release checks run every 24 hours by default. Set `updates.enabled: f
 | Symptom | Next step |
 | --- | --- |
 | No alert on first startup | Expected baseline behavior; send a TEST to confirm delivery |
-| A new announcement produces no alert | Inspect provider/type/confidence/scope filters and provider readiness |
+| A new announcement produces no alert | Run `history explain --id ID`; inspect provider readiness if it is not in history |
 | Telegram pairing cannot find a chat | Send the pairing command to the bot/topic; check webhook conflicts or use manual IDs |
 | Slack returns an error | Check the webhook's channel/workspace and whether the app was removed |
 | Configuration edit has no effect | Inspect reload error; check environment/CLI overrides and restart-only fields |

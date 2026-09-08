@@ -57,11 +57,16 @@ type Event struct {
 }
 
 type Notification struct {
-	SchemaVersion int       `json:"schema_version"`
-	ID            string    `json:"notification_id"`
-	DetectedAt    time.Time `json:"detected_at"`
-	Test          bool      `json:"test"`
-	Event         Event     `json:"event"`
+	SchemaVersion           int           `json:"schema_version"`
+	ID                      string        `json:"notification_id"`
+	DetectedAt              time.Time     `json:"detected_at"`
+	Test                    bool          `json:"test"`
+	Event                   Event         `json:"event"`
+	Kind                    string        `json:"kind,omitempty"`
+	PreviousEvent           *Event        `json:"previous_event,omitempty"`
+	Changes                 []FieldChange `json:"changes,omitempty"`
+	PreviousEventUnverified bool          `json:"previous_event_unverified,omitempty"`
+	RelatedNotificationID   string        `json:"related_notification_id,omitempty"`
 }
 
 type CachedResponse struct {

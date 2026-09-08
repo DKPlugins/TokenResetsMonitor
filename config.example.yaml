@@ -1,10 +1,13 @@
 # Public announcements, not personal account usage.
 # Operational YAML changes reload automatically; infrastructure changes need restart.
-config_version: 2
+config_version: 3
 api_base_url: https://tokenresets.com/api/v1
 poll_interval: 30m
 request_timeout: 30s
 state_path: ./data/state.db
+history:
+  # 0 keeps detailed history indefinitely; a positive number prunes old detail.
+  retention_days: 0
 providers:
   - slug: openai-codex
     plans: []
@@ -19,6 +22,8 @@ minimum_confidence: reported
 unknown_scope: include
 webhook:
   enabled: false
+  # Opt in after teaching the receiver about correction/withdrawal notifications.
+  notify_changes: false
   url: ""
   method: POST
   headers: {}
@@ -29,6 +34,7 @@ webhook:
 telegram:
   # Run: tokenresetsmonitor setup telegram --config ./config.yaml
   enabled: false
+  notify_changes: true
   bot_token: ""
   chat_id: ""
   message_thread_id: 0
@@ -38,6 +44,7 @@ telegram:
 slack:
   # Run: tokenresetsmonitor setup slack --config ./config.yaml
   enabled: false
+  notify_changes: true
   # Prefer "${SLACK_WEBHOOK_URL}" with the secret in your service environment.
   webhook_url: ""
   timeout: 15s

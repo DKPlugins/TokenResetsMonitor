@@ -2,7 +2,7 @@
 
 Install exact versions. Read the release notes before updating, including schema changes and the minimum Go version if you build from source. The process checks release metadata when enabled but never downloads or installs executable updates.
 
-Application SemVer and the three schema versions are separate. A compatible application update preserves the meaning of existing configuration and delivery IDs. For 1.1, configuration and state schemas are `2`; webhook `schema_version` remains `1`. Version 1 configuration files remain readable and are normalized in memory.
+Application SemVer and the three schema versions are separate. A compatible application update preserves the meaning of existing configuration and delivery IDs. For 1.2, configuration and state schemas are `3`; webhook `schema_version` remains `1`. Version 1 and 2 configuration files remain readable and are normalized in memory.
 
 ## Check before installing
 
@@ -64,13 +64,17 @@ tokenresetsmonitor config migrate --apply --config ./config.yaml
 tokenresetsmonitor config validate --config ./config.yaml
 ```
 
-The first command previews the transition; `--apply` writes it and retains the original in a sibling `config.yaml.backup-<timestamp>`. Files already at the current version are left unchanged. Version 1 files remain readable by 1.1 without rewriting. New 1.1 settings require the 1.1 binary; a 1.0 validator accepts neither these fields nor schema 2. Keep the original version-1 configuration for rollback. Unknown future configuration versions are refused.
+The first command previews the transition; `--apply` writes it and retains the original in a sibling `config.yaml.backup-<timestamp>`. Files already at the current version are left unchanged. Version 1 and 2 files remain readable by 1.2 without rewriting. New 1.2 settings require the 1.2 binary; earlier validators reject schema 3 and its new fields. Keep the original configuration for rollback. Unknown future configuration versions are refused.
 
-## Moving from 1.0 to 1.1
+## Moving from 1.0 or a 1.1 candidate to 1.2
 
-The first 1.1 daemon startup migrates supported state to schema 2 and retains a sibling pre-migration backup. Existing notification IDs, acknowledgements, and pending work are preserved. The added channel cooldown survives restarts.
+The first 1.2 daemon startup migrates supported state to schema 3 and retains a sibling pre-migration backup. Existing notification IDs, acknowledgements, pending work, and destination cooldowns are preserved. Upgrading does not replay baseline announcements. Earlier releases did not retain individual attempt histories or all historical filter decisions, so migrated records identify unavailable detail.
 
-A 1.0 binary cannot read schema 2. Keep a stopped schema-1 backup and matching version-1 configuration for rollback; merely replacing the executable is insufficient. A rollback to an older backup may resend deliveries acknowledged after that backup, which is why receivers should deduplicate notification IDs.
+A 1.0 or 1.1 binary cannot read schema 3. Keep the pre-migration database and matching old configuration for rollback; merely replacing the executable is insufficient. A rollback to an older backup may resend deliveries acknowledged after that backup, which is why receivers should deduplicate notification IDs.
+
+Correction and withdrawal messages are enabled by default for Telegram and Slack; use `notify_changes: false` in a channel to disable them. Webhooks retain their existing ordinary-announcement behavior unless `webhook.notify_changes: true` is explicitly set. Adapt custom receivers/templates to distinguish change notifications before enabling it. These messages refer to announcements previously acknowledged by the same destination; merely enabling a channel does not subscribe it to old history.
+
+Detailed history is retained indefinitely by default (`history.retention_days: 0`). A positive retention period removes expired detail while keeping the durable identity and suppression markers needed to avoid replay. See [history and delivery management](history.md).
 
 ## Rollback
 

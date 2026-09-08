@@ -17,11 +17,11 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-const SchemaVersion = 2
+const SchemaVersion = 3
 
-var ErrLocked = errors.New("state database is in use; stop the monitor before this command")
+var ErrLocked = errors.New("state database is in use by a running monitor")
 
-var buckets = []string{"meta", "providers", "events", "outbox", "cache", "cooldowns"}
+var buckets = []string{"meta", "providers", "events", "outbox", "cache", "cooldowns", "attempts", "revisions"}
 
 type Store struct {
 	db          *bolt.DB
@@ -29,6 +29,8 @@ type Store struct {
 	statusMu    sync.Mutex
 	runtimeMu   sync.RWMutex
 	runtimeJSON []byte
+	policyMu    sync.RWMutex
+	policy      Policy
 }
 
 // Open takes a bounded exclusive lock. An existing database is inspected read-only
@@ -88,9 +90,14 @@ func Open(path string) (*Store, error) {
 				return err
 			}
 		}
-		// Schema zero is the initial, unversioned bucket layout. Schema two adds
-		// recipient cooldowns without changing event identities or deliveries.
+		// Schema three adds immutable attempt history and source decisions.
 		// Older schemas were backed up before this transaction.
+		if err := migrateHistory(tx, version); err != nil {
+			return err
+		}
+		if err := recoverAttempts(tx, time.Now()); err != nil {
+			return err
+		}
 		return tx.Bucket([]byte("meta")).Put([]byte("state_schema_version"), []byte(strconv.Itoa(SchemaVersion)))
 	}); err != nil {
 		_ = db.Close()
@@ -130,6 +137,9 @@ func schema(db *bolt.DB) (int, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func getJSON(b *bolt.Bucket, key string, target any) (bool, error) {
+	if b == nil {
+		return false, nil
+	}
 	data := b.Get([]byte(key))
 	if data == nil {
 		return false, nil

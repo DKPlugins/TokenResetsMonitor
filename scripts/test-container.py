@@ -196,6 +196,21 @@ class Smoke:
                 raise SmokeFailure("initial metrics are missing " + required)
         self.phase("initial baseline, live/ready endpoints, Docker healthcheck and metrics")
 
+        # Exercise local management as the image's non-root service user with
+        # read-only root/config mounts and no management port exposed to the host.
+        for command in (
+            ["history", "list"],
+            ["deliveries", "list"],
+            ["filters", "preview", "--candidate-config", "/config/config.yaml"],
+        ):
+            response = json.loads(docker("exec", self.monitor, "tokenresetsmonitor", *command,
+                                         "--config", "/config/config.yaml", "--json").stdout)
+            if response.get("configuration_source") != "running" or "data" not in response:
+                raise SmokeFailure("management did not query the running daemon")
+        if self.status().get("pending") != 0:
+            raise SmokeFailure("read-only management changed the delivery queue")
+        self.phase("private live history, delivery listing and filter preview under the non-root container user")
+
         self.fixture_start(500)
         self.config["logging"]["level"] = "debug"
         self.config_write()

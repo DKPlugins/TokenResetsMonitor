@@ -405,7 +405,7 @@ func TestContinuousRunCancelsInFlightSendAndKeepsPending(t *testing.T) {
 	}
 }
 
-func TestDetailBudgetFailureDoesNotCommitPartialScan(t *testing.T) {
+func TestDetailBudgetFailurePreservesCompleteListing(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Webhook.Enabled = true
 	cfg.Webhook.URL = "https://example.test/hook"
@@ -423,13 +423,20 @@ func TestDetailBudgetFailureDoesNotCommitPartialScan(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	source := &stubSource{events: []model.Event{testEvent("must-not-commit")}, detailErr: api.ErrScanBudget}
+	source := &stubSource{events: []model.Event{testEvent("complete-list-event")}, detailErr: api.ErrScanBudget}
 	monitor := &monitor{store: db, source: source, policy: policy, logger: quiet()}
 	if err := monitor.poll(context.Background()); err == nil {
 		t.Fatal("oversized scan reported success")
 	}
 	due, err := db.Due("webhook", time.Now(), 0)
-	if err != nil || len(due) != 1 || due[0].Notification.Event.ID != "pending" {
-		t.Fatalf("oversized detail scan changed the durable queue: %+v %v", due, err)
+	if err != nil || len(due) != 2 {
+		t.Fatalf("detail failure lost an existing delivery or the complete listing: %+v %v", due, err)
+	}
+	seen := map[string]bool{}
+	for _, delivery := range due {
+		seen[delivery.Notification.Event.ID] = true
+	}
+	if !seen["pending"] || !seen["complete-list-event"] {
+		t.Fatal("detail failure did not preserve both independent results")
 	}
 }

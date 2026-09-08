@@ -19,6 +19,7 @@ type Config struct {
 	Observability     Observability    `yaml:"observability" json:"observability"`
 	Updates           Updates          `yaml:"updates" json:"updates"`
 	Logging           Logging          `yaml:"logging" json:"logging"`
+	History           History          `yaml:"history" json:"history"`
 }
 
 type ProviderFilter struct {
@@ -29,15 +30,17 @@ type ProviderFilter struct {
 }
 
 type Webhook struct {
-	Enabled      bool              `yaml:"enabled" json:"enabled"`
-	URL          string            `yaml:"url" json:"-"`
-	Method       string            `yaml:"method" json:"method"`
-	Headers      map[string]string `yaml:"headers" json:"-"`
-	BodyTemplate string            `yaml:"body_template" json:"-"`
-	Timeout      string            `yaml:"timeout" json:"timeout"`
+	NotifyChanges bool              `yaml:"notify_changes" json:"notify_changes"`
+	Enabled       bool              `yaml:"enabled" json:"enabled"`
+	URL           string            `yaml:"url" json:"-"`
+	Method        string            `yaml:"method" json:"method"`
+	Headers       map[string]string `yaml:"headers" json:"-"`
+	BodyTemplate  string            `yaml:"body_template" json:"-"`
+	Timeout       string            `yaml:"timeout" json:"timeout"`
 }
 
 type Telegram struct {
+	NotifyChanges       bool   `yaml:"notify_changes" json:"notify_changes"`
 	Enabled             bool   `yaml:"enabled" json:"enabled"`
 	BotToken            string `yaml:"bot_token" json:"-"`
 	ChatID              string `yaml:"chat_id" json:"-"`
@@ -58,10 +61,15 @@ type Logging struct {
 }
 
 type Slack struct {
-	Enabled    bool   `yaml:"enabled" json:"enabled"`
-	WebhookURL string `yaml:"webhook_url" json:"-"`
-	Timeout    string `yaml:"timeout" json:"timeout"`
+	NotifyChanges bool   `yaml:"notify_changes" json:"notify_changes"`
+	Enabled       bool   `yaml:"enabled" json:"enabled"`
+	WebhookURL    string `yaml:"webhook_url" json:"-"`
+	Timeout       string `yaml:"timeout" json:"timeout"`
 }
+type History struct {
+	RetentionDays int `yaml:"retention_days" json:"retention_days"`
+}
+
 type Reload struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 }
