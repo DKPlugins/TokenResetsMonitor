@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [ValidatePattern('^v\d+\.\d+\.\d+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$')]
-    [string]$Version = 'v1.0.0-rc.3',
+    [string]$Version = 'v1.0.0-rc.4',
     [string]$InstallDir = (Join-Path $env:ProgramFiles 'TokenResetsMonitor'),
     [string]$DataDir = (Join-Path $env:ProgramData 'TokenResetsMonitor'),
     [switch]$NoStart

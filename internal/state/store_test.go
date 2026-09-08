@@ -2,12 +2,15 @@ package state_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/DKPlugins/TokenResetsMonitor/internal/fileio"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/state"
 	bolt "go.etcd.io/bbolt"
@@ -313,6 +316,52 @@ func TestLockAndLiveStatusSnapshot(t *testing.T) {
 	status, err = state.ReadStatus(path)
 	if err != nil || status.Running {
 		t.Fatal("status replacement failed", err)
+	}
+}
+
+func TestStatusSnapshotReaderDoesNotBlockReplacement(t *testing.T) {
+	s, path := openStore(t)
+	p := policy(map[string]string{})
+	reconcile(t, s, p)
+	scan(t, s, p)
+	if err := s.PublishStatus(true, now); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the same kind of handle used by ReadStatus open throughout rename.
+	// On Windows an ordinary os.Open handle would deny replacement here.
+	reader, err := fileio.OpenSnapshot(path + ".status.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if err := s.PublishStatus(false, now.Add(time.Second)); err != nil {
+		t.Fatalf("live status reader blocked snapshot replacement: %v", err)
+	}
+	oldData, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous model.Status
+	if err := json.Unmarshal(oldData, &previous); err != nil {
+		t.Fatal(err)
+	}
+	if !previous.Running || !previous.UpdatedAt.Equal(now) {
+		t.Fatal("open snapshot did not retain its complete previous version", previous)
+	}
+	current, err := state.ReadStatus(path)
+	if err != nil || current.Running || !current.UpdatedAt.Equal(now.Add(time.Second)) {
+		t.Fatal("new reader did not see the replacement snapshot", err, current)
+	}
+}
+
+func TestReadStatusRejectsOversizedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	data := append([]byte("{}"), bytes.Repeat([]byte(" "), 1<<20)...)
+	if err := os.WriteFile(path+".status.json", data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.ReadStatus(path); err == nil {
+		t.Fatal("oversized status snapshot was accepted")
 	}
 }
 

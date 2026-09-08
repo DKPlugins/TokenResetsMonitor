@@ -6,7 +6,7 @@ Monitor public AI quota reset announcements from [TokenResets](https://tokenrese
 
 **This monitors public announcements, not your account's remaining tokens.** An announcement does not confirm that your personal limits have reset. Announced, published, effective, and detected times may differ; unknown scope stays unknown. See the source's [methodology](https://tokenresets.com/methodology/). This is an independent project and is not affiliated with TokenResets, OpenAI, Anthropic, or Telegram.
 
-The initial release line is **`v1.0.0-rc.3`**. Stable `v1.0.0` follows the [release acceptance checklist](docs/releasing.md). Download artifacts from [GitHub Releases](https://github.com/DKPlugins/TokenResetsMonitor/releases); if a candidate has not been published yet, use the source build below.
+The initial release line is **`v1.0.0-rc.4`**. Stable `v1.0.0` follows the [release acceptance checklist](docs/releasing.md). Download artifacts from [GitHub Releases](https://github.com/DKPlugins/TokenResetsMonitor/releases); if a candidate has not been published yet, use the source build below.
 
 ## Features
 
@@ -45,9 +45,9 @@ Use `--help` for the command list and `version --json` for machine-readable buil
 The installer supports Linux amd64/arm64 and requires root, `curl`, `tar`, `sha256sum`, `fuser` (usually the `psmisc` package), and standard account-management tools. Download the script for the desired version and inspect it before running:
 
 ```sh
-curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.3/install.sh -o install.sh
+curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.4/install.sh -o install.sh
 less install.sh
-sudo sh install.sh --version v1.0.0-rc.3 --no-start
+sudo sh install.sh --version v1.0.0-rc.4 --no-start
 sudoedit /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor config validate --config /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor test-notification all --config /etc/tokenresetsmonitor/config.yaml
@@ -75,9 +75,9 @@ The supplied unit permits writes only in the default state/log directories. If y
 Run the installer in **Administrator PowerShell**:
 
 ```powershell
-Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.3/install.ps1 -OutFile install.ps1
+Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.4/install.ps1 -OutFile install.ps1
 Get-Content ./install.ps1
-./install.ps1 -Version v1.0.0-rc.3 -NoStart
+./install.ps1 -Version v1.0.0-rc.4 -NoStart
 notepad "$env:ProgramData\TokenResetsMonitor\config.yaml"
 $monitor = "$env:ProgramFiles\TokenResetsMonitor\tokenresetsmonitor.exe"
 & $monitor config validate --config "$env:ProgramData\TokenResetsMonitor\config.yaml"
@@ -279,7 +279,7 @@ docker compose logs --no-log-prefix --no-color --since 24h monitor |
 docker compose cp monitor:/data/diagnostics.zip ./diagnostics.zip
 ```
 
-`--input structured-logs.jsonl` also accepts a file. Plain text or prefixed log lines are skipped and counted. Access to exports follows filesystem permissions; the Windows installer supplies restricted directory ACLs. Review diagnostic archives before attaching them to a public issue.
+`--input structured-logs.jsonl` also accepts a file. Plain text or prefixed log lines are skipped and counted. Export archives are created with owner-only permissions on Linux. On Windows, a protected ACL grants access only to the creating user, SYSTEM, and Administrators, even in a shared output directory; filesystems that cannot preserve that protection are refused. Review diagnostic archives before attaching them to a public issue.
 
 ## Updates, development, and troubleshooting
 

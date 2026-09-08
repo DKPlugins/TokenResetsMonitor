@@ -15,6 +15,7 @@ import (
 
 	"github.com/DKPlugins/TokenResetsMonitor/internal/buildinfo"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/config"
+	"github.com/DKPlugins/TokenResetsMonitor/internal/fileio"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
 )
 
@@ -46,7 +47,7 @@ func Export(cfg config.Config, opts ExportOptions) error {
 	if e := os.MkdirAll(filepath.Dir(opts.Output), 0700); e != nil {
 		return errors.New("cannot create diagnostics directory")
 	}
-	out, e := os.OpenFile(opts.Output, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	out, e := createPrivateArchive(opts.Output)
 	if e != nil {
 		return errors.New("cannot create diagnostics archive; destination may already exist")
 	}
@@ -76,7 +77,7 @@ func Export(cfg config.Config, opts ExportOptions) error {
 				return err
 			}
 		} else {
-			f, err := os.Open(opts.Input)
+			f, err := fileio.OpenSnapshot(opts.Input)
 			if err != nil {
 				return errors.New("cannot read --input")
 			}
@@ -100,7 +101,7 @@ func Export(cfg config.Config, opts ExportOptions) error {
 				if name != "tokenresetsmonitor.jsonl" && !(strings.HasPrefix(name, "tokenresetsmonitor-") && (strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".jsonl.gz"))) {
 					continue
 				}
-				f, err := os.Open(filepath.Join(cfg.Logging.Directory, name))
+				f, err := fileio.OpenSnapshot(filepath.Join(cfg.Logging.Directory, name))
 				if err != nil {
 					m.Notes = append(m.Notes, "A rotated log was unavailable during collection.")
 					continue
@@ -176,7 +177,7 @@ func fileSnapshot(file *os.File) io.Reader {
 }
 
 func readStatusSnapshot(path string) ([]byte, error) {
-	f, err := os.Open(path)
+	f, err := fileio.OpenSnapshot(path)
 	if err != nil {
 		return nil, err
 	}

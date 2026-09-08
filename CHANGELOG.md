@@ -4,6 +4,13 @@ All notable changes are recorded here. This project follows [Semantic Versioning
 
 ## Unreleased
 
+## 1.0.0-rc.4
+
+### Fixed
+
+- Create Windows diagnostic archives with a protected access-control list, including when exporting into a shared directory.
+- Allow Windows log rotation and atomic status replacement while diagnostics readers hold an earlier file snapshot.
+
 ## 1.0.0-rc.3
 
 ### Fixed

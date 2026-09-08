@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/DKPlugins/TokenResetsMonitor/internal/fileio"
 	"github.com/DKPlugins/TokenResetsMonitor/internal/model"
 	bolt "go.etcd.io/bbolt"
 )
@@ -209,14 +211,23 @@ func (s *Store) PublishStatus(running bool, now time.Time) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, target)
+	return replaceStatusFile(tmp, target)
 }
 
 func ReadStatus(path string) (model.Status, error) {
+	const maxStatusBytes = 1 << 20
 	var status model.Status
-	data, err := os.ReadFile(path + ".status.json")
+	reader, err := fileio.OpenSnapshot(path + ".status.json")
 	if err != nil {
 		return status, err
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(io.LimitReader(reader, maxStatusBytes+1))
+	if err != nil {
+		return status, err
+	}
+	if len(data) > maxStatusBytes {
+		return status, errors.New("status snapshot exceeds size limit")
 	}
 	err = json.Unmarshal(data, &status)
 	return status, err
