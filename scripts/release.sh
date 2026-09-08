@@ -35,6 +35,6 @@ for TARGET in linux_amd64 linux_arm64 windows_amd64; do
         tar -czf "$OUTPUT/$ASSET.tar.gz" -C "$WORK" tokenresetsmonitor LICENSE README.md config.example.yaml install.sh install.ps1 tokenresetsmonitor.service
     fi
 done
-(cd "$OUTPUT" && sha256sum ./*.tar.gz ./*.zip | sed 's|  \./|  |' > checksums.txt)
 cp scripts/install.sh scripts/install.ps1 "$OUTPUT/"
+(cd "$OUTPUT" && sha256sum ./*.tar.gz ./*.zip ./install.sh ./install.ps1 | sed 's|  \./|  |' > checksums.txt)
 echo "Release files: $OUTPUT"

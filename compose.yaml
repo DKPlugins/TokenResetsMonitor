@@ -1,6 +1,6 @@
 services:
   monitor:
-    image: ghcr.io/dkplugins/tokenresetsmonitor:${TRM_VERSION:-v1.0.0-rc.1}
+    image: ghcr.io/dkplugins/tokenresetsmonitor:${TRM_VERSION:-v1.0.0-rc.2}
     restart: unless-stopped
     init: true
     read_only: true

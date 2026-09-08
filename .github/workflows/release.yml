@@ -84,4 +84,6 @@ jobs:
           gh release create "$RELEASE_TAG" \
             "dist/$RELEASE_TAG/"*.tar.gz "dist/$RELEASE_TAG/"*.zip \
             "dist/$RELEASE_TAG/checksums.txt" "dist/$RELEASE_TAG/install.sh" "dist/$RELEASE_TAG/install.ps1" \
-            --verify-tag --title "TokenResetsMonitor $RELEASE_TAG" --generate-notes "$@"
+            --draft --verify-tag --title "TokenResetsMonitor $RELEASE_TAG" --generate-notes "$@"
+          # Attach every artifact before publication makes this release immutable.
+          gh release edit "$RELEASE_TAG" --draft=false

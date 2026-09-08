@@ -4,6 +4,17 @@ All notable changes are recorded here. This project follows [Semantic Versioning
 
 ## Unreleased
 
+## 1.0.0-rc.2
+
+### Fixed
+
+- Make the Linux installer's systemd availability check pass the hosted runner's ShellCheck rules.
+
+### Release status
+
+- The first candidate tag remains available as source; its release publication was stopped by CI before artifacts were published.
+- Candidate acceptance includes native Windows/systemd services and Docker startup on amd64 and arm64.
+
 ## 1.0.0-rc.1
 
 Initial release candidate; stable release acceptance is tracked in [docs/releasing.md](docs/releasing.md).

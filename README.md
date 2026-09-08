@@ -6,7 +6,7 @@ Monitor public AI quota reset announcements from [TokenResets](https://tokenrese
 
 **This monitors public announcements, not your account's remaining tokens.** An announcement does not confirm that your personal limits have reset. Announced, published, effective, and detected times may differ; unknown scope stays unknown. See the source's [methodology](https://tokenresets.com/methodology/). This is an independent project and is not affiliated with TokenResets, OpenAI, Anthropic, or Telegram.
 
-The initial release line is **`v1.0.0-rc.1`**. Stable `v1.0.0` follows the [release acceptance checklist](docs/releasing.md). Download artifacts from [GitHub Releases](https://github.com/DKPlugins/TokenResetsMonitor/releases); if a candidate has not been published yet, use the source build below.
+The initial release line is **`v1.0.0-rc.2`**. Stable `v1.0.0` follows the [release acceptance checklist](docs/releasing.md). Download artifacts from [GitHub Releases](https://github.com/DKPlugins/TokenResetsMonitor/releases); if a candidate has not been published yet, use the source build below.
 
 ## Features
 
@@ -32,9 +32,11 @@ tokenresetsmonitor run --config ./config.yaml
 
 On Windows, use `./tokenresetsmonitor.exe` in PowerShell. The wizard downloads the provider catalog and prompts for filters and notification destinations. It refuses to overwrite an existing file. If the API is unavailable, enter provider slugs manually and validate them against the source when it recovers.
 
-For unattended setup, `init --defaults --config ./config.yaml` writes a default configuration without contacting the API. Both notification channels start disabled; monitoring and event logging still work. `test-notification all` requires at least one enabled channel. You can test a named channel before enabling it.
+For unattended setup, `init --defaults --config ./config.yaml` writes a default configuration without contacting the API. Both notification channels start disabled unless enabled through environment overrides; monitoring and event logging still work. `test-notification all` requires at least one enabled channel. You can test a named channel before enabling it.
 
 `run --once` performs one complete scan and delivery pass, then exits. Continuous operation polls immediately, then at the configured interval. Stop a foreground process with Ctrl+C.
+
+Use `--help` for the command list and `version --json` for machine-readable build information. Runtime CLI overrides are `--state-path`, `--poll-interval`, and `--log-level`; `--config` selects the file. Service-management and configuration-migration commands use the saved settings and reject runtime overrides.
 
 ## Install as a service
 
@@ -43,9 +45,9 @@ For unattended setup, `init --defaults --config ./config.yaml` writes a default 
 The installer supports Linux amd64/arm64 and requires root, `curl`, `tar`, `sha256sum`, `fuser` (usually the `psmisc` package), and standard account-management tools. Download the script for the desired version and inspect it before running:
 
 ```sh
-curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.1/install.sh -o install.sh
+curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.2/install.sh -o install.sh
 less install.sh
-sudo sh install.sh --version v1.0.0-rc.1 --no-start
+sudo sh install.sh --version v1.0.0-rc.2 --no-start
 sudoedit /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor config validate --config /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor test-notification all --config /etc/tokenresetsmonitor/config.yaml
@@ -73,9 +75,9 @@ The supplied unit permits writes only in the default state/log directories. If y
 Run the installer in **Administrator PowerShell**:
 
 ```powershell
-Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.1/install.ps1 -OutFile install.ps1
+Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.2/install.ps1 -OutFile install.ps1
 Get-Content ./install.ps1
-./install.ps1 -Version v1.0.0-rc.1 -NoStart
+./install.ps1 -Version v1.0.0-rc.2 -NoStart
 notepad "$env:ProgramData\TokenResetsMonitor\config.yaml"
 $monitor = "$env:ProgramFiles\TokenResetsMonitor\tokenresetsmonitor.exe"
 & $monitor config validate --config "$env:ProgramData\TokenResetsMonitor\config.yaml"
@@ -173,7 +175,9 @@ export TRM_EVENT_TYPES='[hard_reset, banked_reset_grant]'
 tokenresetsmonitor run --config ./config.yaml --log-level debug
 ```
 
-Collections are parsed as YAML. Any parsed string can contain `${NAME}` references; an unset referenced variable is an error. For example, `Authorization: "Bearer ${WEBHOOK_TOKEN}"` keeps the secret outside your YAML. The wizard preserves references. `init --defaults` saves effective nonsecret overrides, while webhook URL/template and Telegram token/chat ID overrides are saved as `${TRM_...}` references. `TRM_WEBHOOK_HEADERS` is a runtime override and is not saved. Keep these secret environment variables available to the actual service/container after initialization.
+Collections are parsed as YAML and replace the corresponding list or map rather than merging it; for example, `TRM_WEBHOOK_HEADERS='{}'` removes all configured custom headers. Unknown provider-filter keys are rejected. Any parsed string can contain `${NAME}` references; an unset referenced variable is an error. For example, `Authorization: "Bearer ${WEBHOOK_TOKEN}"` keeps the secret outside your YAML. The wizard preserves references. `init --defaults` saves effective nonsecret overrides, while webhook URL/template and Telegram token/chat ID overrides are saved as `${TRM_...}` references. `TRM_WEBHOOK_HEADERS` is a runtime override and is not saved. Keep these secret environment variables available to the actual service/container after initialization.
+
+The `config_version` field is required. An unversioned configuration must first pass through `config migrate`; it is not silently interpreted as the latest format. API base URLs must not contain a query or fragment, and all configured HTTP URLs must omit embedded username/password credentials. Supply webhook authentication through headers or supported query parameters instead.
 
 ## Webhook payload and templates
 
@@ -201,6 +205,8 @@ Templates receive the notification struct; use `.ID`, `.DetectedAt`, `.Test`, `.
 
 Create a bot through [BotFather](https://core.telegram.org/bots/features#creating-a-new-bot), send it a message or add it to the intended group, and obtain the destination chat ID. Supply `bot_token` and `chat_id`; use `message_thread_id` for a forum topic. Sending uses [Bot API `sendMessage`](https://core.telegram.org/bots/api#sendmessage) and requires no inbound HTTP endpoint.
 
+For a new bot, send `/start` in the intended private conversation, or a command addressed to the bot in its group. Read the bot's [getUpdates response](https://core.telegram.org/bots/api#getupdates) and copy `message.chat.id` into `chat_id` as a quoted string, preserving any minus sign. A message sent within a forum topic also supplies `message_thread_id`. `getUpdates` is unavailable while that bot has an incoming webhook configured; use a dedicated bot or obtain the chat/topic IDs from the bot's existing update handler. Run `test-notification telegram` to confirm the selected destination.
+
 Messages include the provider, event type, confidence, scope, dates, source link, and the distinction between a public announcement and personal account limits. A Telegram HTTP `200` response counts as success only when its JSON contains `ok: true`.
 
 ## Test notification delivery
@@ -218,7 +224,7 @@ Tests make one attempt per channel with no retries, do not contact TokenResets, 
 
 Dry-run renders without any network calls and prints only the method, redacted destination, header names, and body byte count. It does not print credentials, header values, or arbitrary request bodies.
 
-Exit codes: `0` success, `1` delivery/runtime failure, `2` invalid configuration or arguments. For `all`, a delivery failure in one channel does not prevent the other channel's test.
+Exit codes: `0` success, `1` delivery/runtime failure, `2` invalid configuration or arguments. For `all`, a destination or template error in one channel does not prevent the other channel's test. A configuration error takes precedence over delivery failures in the final exit code.
 
 ## Delivery and history guarantees
 
@@ -226,7 +232,7 @@ Every cycle traverses all pages for each selected provider using its dedicated `
 
 The first successful **complete** scan of a provider establishes history and sends nothing. A failed page does not complete that provider's baseline. New providers and newly enabled channels also start without historical notifications. Widening filters does not replay unchanged old records. A later source revision can make a previously filtered new event eligible, but an already delivered event is not announced as another reset.
 
-History and queue insertion are transactional in a local bbolt database. Run only one monitor per state file, on a local filesystem. webhook and Telegram deliveries have independent queues. Network errors, `429`, and `5xx` retry with backoff capped at 30 minutes; a longer `Retry-After` is honored. Permanent failures remain visible through `status`.
+History and queue insertion are transactional in a local bbolt database. Run only one monitor per state file, on a local filesystem. Webhook and Telegram deliveries have independent queues. Network errors, `429`, and `5xx` retry with backoff capped at 30 minutes; a longer `Retry-After` is honored up to a seven-day safety limit. Permanent failures remain visible through `status`.
 
 After correcting a permanent failure, stop the monitor and requeue eligible failed deliveries:
 
@@ -236,6 +242,8 @@ tokenresetsmonitor deliveries retry-failed --config ./config.yaml
 
 Changing filters cancels pending deliveries that no longer match. Changing a recipient cancels its old queue; changing credentials preserves it. Confirmed source withdrawals cancel pending deliveries, but disappearance from a list alone is not proof of withdrawal. Separate correction/retraction notifications are deferred to a later version.
 
+Webhook recipient identity consists of its URL with recognized credential query parameters removed; header values do not define the recipient. Changing the URL path therefore counts as a recipient change, including when a provider embeds a token in that path. Telegram recipient identity uses the API address, chat ID, and topic ID, independently of the bot token. If custom headers or a body template route messages to different recipients, resolve pending deliveries before changing that routing.
+
 A crash after the destination accepts a request but before local confirmation may cause a repeat. Webhook receivers should persist and deduplicate `Idempotency-Key`. Telegram provides no equivalent idempotency key, so occasional duplicates are possible. Never delete the state file as an update procedure: doing so starts a new baseline and loses queued work.
 
 ## Logs and diagnostics
@@ -244,6 +252,8 @@ Logs use UTC and structured fields such as `run_id`, `cycle_id`, `event_id`, `no
 
 File logging always writes JSON lines to `tokenresetsmonitor.jsonl`, even when console output is text. It rotates at 10 MiB by default, compresses archives, and keeps at most five archives for up to 14 days. Only the daemon writes these files; commands such as test-notification print their own results separately.
 
+A single log record is limited to 1 MiB. File or console write failures are reported separately on stderr and make the run finish with an error. Export skips oversized input records, retains following valid records, and records the omission in its manifest.
+
 ```sh
 tokenresetsmonitor status --config ./config.yaml
 tokenresetsmonitor status --json --config ./config.yaml
@@ -251,6 +261,8 @@ tokenresetsmonitor logs export --since 24h --output diagnostics.zip --config ./c
 ```
 
 The ZIP includes available redacted logs, build information, and an operational status snapshot. It excludes configuration, environment, the state database, and message bodies. Export works while the monitor is running, records missing periods in `manifest.json`, refuses to overwrite an existing archive, and never uploads anything. Its snapshot may be stale after an unclean shutdown; `status` reports the snapshot age.
+
+Diagnostic commands also load and validate the configuration. Run them with the same required environment references as the service; an interactive `sudo` command does not automatically import systemd's `EnvironmentFile`. An invalid enabled destination must be corrected before using `status` or `logs export`.
 
 For systemd logs, request the raw JSON message instead of journald's wrapper:
 

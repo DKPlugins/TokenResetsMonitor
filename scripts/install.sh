@@ -3,7 +3,7 @@
 set -eu
 umask 077
 
-VERSION=v1.0.0-rc.1
+VERSION=v1.0.0-rc.2
 START=1
 SYSTEMD=1
 REPOSITORY=DKPlugins/TokenResetsMonitor
@@ -17,7 +17,7 @@ usage() {
 Usage: sudo sh install.sh [--version vX.Y.Z[-prerelease]] [--no-start] [--foreground]
 
 Installs a checksum-verified release for Linux amd64/arm64. Defaults to
-v1.0.0-rc.1. Existing configuration and state are preserved. --foreground
+v1.0.0-rc.2. Existing configuration and state are preserved. --foreground
 skips systemd registration; --no-start leaves the installed service stopped.
 EOF
 }
@@ -32,7 +32,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 printf '%s\n' "$VERSION" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
-    echo 'Version must be a release tag such as v1.0.0-rc.1.' >&2; exit 2;
+    echo 'Version must be a release tag such as v1.0.0-rc.2.' >&2; exit 2;
 }
 [ "$(uname -s)" = Linux ] || { echo 'This installer supports Linux only.' >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { echo 'Run this installer with sudo or as root.' >&2; exit 2; }
@@ -45,9 +45,9 @@ for dependency in curl tar sha256sum awk install mktemp getent useradd fuser; do
     command -v "$dependency" >/dev/null 2>&1 || { echo "Required command missing: $dependency" >&2; exit 2; }
 done
 if [ "$SYSTEMD" -eq 1 ]; then
-    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || {
+    if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
         echo 'systemd is not running; use --foreground for a manual installation.' >&2; exit 2;
-    }
+    fi
 fi
 
 WORK=$(mktemp -d /tmp/tokenresetsmonitor-install.XXXXXXXX)
