@@ -6,7 +6,7 @@ Monitor public AI quota reset announcements from [TokenResets](https://tokenrese
 
 **This monitors public announcements, not your account's remaining tokens.** An announcement does not confirm that your personal limits have reset. Announced, published, effective, and detected times may differ; unknown scope stays unknown. See the source's [methodology](https://tokenresets.com/methodology/). This is an independent project and is not affiliated with TokenResets, OpenAI, Anthropic, or Telegram.
 
-The initial release line is **`v1.0.0-rc.4`**. Stable `v1.0.0` follows the [release acceptance checklist](docs/releasing.md). Download artifacts from [GitHub Releases](https://github.com/DKPlugins/TokenResetsMonitor/releases); if a candidate has not been published yet, use the source build below.
+The stable release is **`v1.0.0`**. Download binaries and installers from [GitHub Releases](https://github.com/DKPlugins/TokenResetsMonitor/releases/tag/v1.0.0), or use the source build below. See the [acceptance record](docs/acceptance.md) for platform, upgrade, and delivery verification.
 
 ## Features
 
@@ -45,9 +45,9 @@ Use `--help` for the command list and `version --json` for machine-readable buil
 The installer supports Linux amd64/arm64 and requires root, `curl`, `tar`, `sha256sum`, `fuser` (usually the `psmisc` package), and standard account-management tools. Download the script for the desired version and inspect it before running:
 
 ```sh
-curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.4/install.sh -o install.sh
+curl -fL https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0/install.sh -o install.sh
 less install.sh
-sudo sh install.sh --version v1.0.0-rc.4 --no-start
+sudo sh install.sh --version v1.0.0 --no-start
 sudoedit /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor config validate --config /etc/tokenresetsmonitor/config.yaml
 sudo tokenresetsmonitor test-notification all --config /etc/tokenresetsmonitor/config.yaml
@@ -75,9 +75,9 @@ The supplied unit permits writes only in the default state/log directories. If y
 Run the installer in **Administrator PowerShell**:
 
 ```powershell
-Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0-rc.4/install.ps1 -OutFile install.ps1
+Invoke-WebRequest https://github.com/DKPlugins/TokenResetsMonitor/releases/download/v1.0.0/install.ps1 -OutFile install.ps1
 Get-Content ./install.ps1
-./install.ps1 -Version v1.0.0-rc.4 -NoStart
+./install.ps1 -Version v1.0.0 -NoStart
 notepad "$env:ProgramData\TokenResetsMonitor\config.yaml"
 $monitor = "$env:ProgramFiles\TokenResetsMonitor\tokenresetsmonitor.exe"
 & $monitor config validate --config "$env:ProgramData\TokenResetsMonitor\config.yaml"

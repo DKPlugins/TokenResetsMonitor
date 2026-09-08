@@ -4,6 +4,14 @@ All notable changes are recorded here. This project follows [Semantic Versioning
 
 ## Unreleased
 
+## 1.0.0 - 2026-09-08
+
+First stable release. Includes the monitoring, notification, diagnostics, service, and update features introduced in the release candidates below. Configuration, state, and webhook schema versions remain `1`.
+
+- Accepted Windows/systemd installation, checksum rejection, upgrades, backup rollback, durable notifications, and public Docker amd64/arm64 execution.
+- Updated bbolt to `1.5.0`, `golang.org/x/sys` to `0.45.0`, Alpine to `3.24`, and pinned checkout/QEMU actions after CI and cross-version database verification.
+- Recorded reproducible checks and their limits in [the acceptance record](docs/acceptance.md).
+
 ## 1.0.0-rc.4
 
 ### Fixed
