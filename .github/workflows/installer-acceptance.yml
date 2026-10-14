@@ -344,7 +344,7 @@ jobs:
           mkdir -p "$docker_config"
           test ! -e "$docker_config/config.json"
           echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - name: Pull publicly and run both published architectures
         run: |
           image="ghcr.io/dkplugins/tokenresetsmonitor:$RELEASE_TAG"
